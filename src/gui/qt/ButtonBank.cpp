@@ -9,14 +9,13 @@ ButtonBank::ButtonBank(QWidget *parent)
     lay->setContentsMargins(4, 4, 4, 4);
     lay->setSpacing(4);
 
-    /* File-op buttons: disabled for now, but signals exist for future wiring. */
-    auto *copyBtn    = makeButton(QStringLiteral("Copy"),    false);
-    auto *moveBtn    = makeButton(QStringLiteral("Move"),    false);
-    auto *deleteBtn  = makeButton(QStringLiteral("Delete"),  false);
-    auto *renameBtn  = makeButton(QStringLiteral("Rename"),  false);
-    auto *makeDirBtn = makeButton(QStringLiteral("MakeDir"), false);
-    auto *infoBtn    = makeButton(QStringLiteral("Info"),    false);
-    auto *filterBtn  = makeButton(QStringLiteral("Filter"),  false);
+    auto *copyBtn    = makeButton(QStringLiteral("Copy"),    true);
+    auto *moveBtn    = makeButton(QStringLiteral("Move"),    true);
+    auto *deleteBtn  = makeButton(QStringLiteral("Delete"),  true);
+    auto *renameBtn  = makeButton(QStringLiteral("Rename"),  true);
+    auto *makeDirBtn = makeButton(QStringLiteral("MakeDir"), true);
+    auto *infoBtn    = makeButton(QStringLiteral("Info"),    true);
+    auto *filterBtn  = makeButton(QStringLiteral("Filter"),  true);
 
     connect(copyBtn,    &QPushButton::clicked, this, &ButtonBank::copyClicked);
     connect(moveBtn,    &QPushButton::clicked, this, &ButtonBank::moveClicked);

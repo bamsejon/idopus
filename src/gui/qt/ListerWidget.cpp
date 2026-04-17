@@ -58,13 +58,21 @@ ListerWidget::ListerWidget(const QString &initialPath, QWidget *parent)
 
     /* --- Action row: Copy · Move · Delete · Rename · MakeDir · Info · Filter
                        | Parent · Root | All · None --- */
-    m_copyBtn    = makeButton(QStringLiteral("Copy"),    false);
-    m_moveBtn    = makeButton(QStringLiteral("Move"),    false);
-    m_deleteBtn  = makeButton(QStringLiteral("Delete"),  false);
-    m_renameBtn  = makeButton(QStringLiteral("Rename"),  false);
-    m_makeDirBtn = makeButton(QStringLiteral("MakeDir"), false);
-    m_infoBtn    = makeButton(QStringLiteral("Info"),    false);
-    m_filterBtn  = makeButton(QStringLiteral("Filter"),  false);
+    m_copyBtn    = makeButton(QStringLiteral("Copy"),    true);
+    m_moveBtn    = makeButton(QStringLiteral("Move"),    true);
+    m_deleteBtn  = makeButton(QStringLiteral("Delete"),  true);
+    m_renameBtn  = makeButton(QStringLiteral("Rename"),  true);
+    m_makeDirBtn = makeButton(QStringLiteral("MakeDir"), true);
+    m_infoBtn    = makeButton(QStringLiteral("Info"),    true);
+    m_filterBtn  = makeButton(QStringLiteral("Filter"),  true);
+
+    connect(m_copyBtn,    &QPushButton::clicked, this, [this]{ emit copyRequested(this);    });
+    connect(m_moveBtn,    &QPushButton::clicked, this, [this]{ emit moveRequested(this);    });
+    connect(m_deleteBtn,  &QPushButton::clicked, this, [this]{ emit deleteRequested(this);  });
+    connect(m_renameBtn,  &QPushButton::clicked, this, [this]{ emit renameRequested(this);  });
+    connect(m_makeDirBtn, &QPushButton::clicked, this, [this]{ emit makeDirRequested(this); });
+    connect(m_infoBtn,    &QPushButton::clicked, this, [this]{ emit infoRequested(this);    });
+    connect(m_filterBtn,  &QPushButton::clicked, this, [this]{ emit filterRequested(this);  });
 
     m_parent2Btn = makeButton(QStringLiteral("Parent"), true);
     m_rootBtn    = makeButton(QStringLiteral("Root"),   true);
@@ -200,6 +208,25 @@ void ListerWidget::refresh() {
 
 void ListerWidget::selectAll()  { m_view->selectAll(); }
 void ListerWidget::selectNone() { m_view->clearSelection(); }
+
+QStringList ListerWidget::selectedPaths() const {
+    QStringList out;
+    if (!m_view || !m_view->selectionModel() || !m_model) return out;
+    QByteArray base = m_path.toUtf8();
+    for (const QModelIndex &idx : m_view->selectionModel()->selectedRows()) {
+        const dir_entry_t *e = m_model->entryAt(idx.row());
+        if (!e) continue;
+        char full[4096];
+        pal_path_join(base.constData(), e->name, full, sizeof full);
+        out << QString::fromUtf8(full);
+    }
+    return out;
+}
+
+void ListerWidget::applyFilter(const QString &showPattern) {
+    m_model->setFilter(showPattern, QString(), false);
+    updateStatus();
+}
 
 void ListerWidget::onDoubleClicked(const QModelIndex &index) {
     if (!index.isValid()) return;

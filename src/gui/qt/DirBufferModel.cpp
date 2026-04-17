@@ -81,6 +81,21 @@ const dir_entry *DirBufferModel::entryAt(int row) const {
     return dir_buffer_get_entry(m_buf, row);
 }
 
+void DirBufferModel::setFilter(const QString &showPattern,
+                                const QString &hidePattern,
+                                bool rejectHidden) {
+    if (!m_buf) return;
+    beginResetModel();
+    QByteArray s = showPattern.toUtf8();
+    QByteArray h = hidePattern.toUtf8();
+    dir_buffer_set_filter(m_buf,
+        showPattern.isEmpty() ? nullptr : s.constData(),
+        hidePattern.isEmpty() ? nullptr : h.constData(),
+        rejectHidden);
+    dir_buffer_apply_filter(m_buf);
+    endResetModel();
+}
+
 DirBufferModel::Stats DirBufferModel::stats() const {
     Stats s;
     if (m_buf) {

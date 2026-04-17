@@ -21,6 +21,9 @@ public:
                         int role = Qt::DisplayRole) const override;
 
     void setPath(const QString &path);
+    void setFilter(const QString &showPattern,
+                   const QString &hidePattern,
+                   bool rejectHidden);
     const struct dir_entry *entryAt(int row) const;
 
     struct Stats {

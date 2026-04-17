@@ -2,6 +2,7 @@
 
 #include <QWidget>
 #include <QString>
+#include <QStringList>
 
 class QTreeView;
 class QLineEdit;
@@ -16,6 +17,7 @@ public:
     explicit ListerWidget(const QString &initialPath, QWidget *parent = nullptr);
 
     QString currentPath() const { return m_path; }
+    QStringList selectedPaths() const;
 
 public slots:
     void setPath(const QString &path);
@@ -26,9 +28,17 @@ public slots:
     void selectAll();
     void selectNone();
     void setActive(bool active);
+    void applyFilter(const QString &showPattern);
 
 signals:
     void pathChanged(const QString &newPath);
+    void copyRequested(ListerWidget *source);
+    void moveRequested(ListerWidget *source);
+    void deleteRequested(ListerWidget *source);
+    void renameRequested(ListerWidget *source);
+    void makeDirRequested(ListerWidget *source);
+    void infoRequested(ListerWidget *source);
+    void filterRequested(ListerWidget *source);
 
 private slots:
     void onDoubleClicked(const QModelIndex &index);

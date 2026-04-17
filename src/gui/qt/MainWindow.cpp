@@ -3,7 +3,44 @@
 #include "ButtonBank.h"
 
 #include <QApplication>
+#include <QDateTime>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <QInputDialog>
+#include <QMessageBox>
 #include <QSplitter>
+
+static bool copyRecursive(const QString &src, const QString &dst) {
+    QFileInfo si(src);
+    if (si.isSymLink()) {
+        QFile::link(si.symLinkTarget(), dst);
+        return true;
+    }
+    if (si.isDir()) {
+        if (!QDir().mkpath(dst)) return false;
+        QDir d(src);
+        const auto entries = d.entryList(QDir::NoDotAndDotDot | QDir::AllEntries
+                                          | QDir::Hidden | QDir::System);
+        for (const QString &name : entries) {
+            if (!copyRecursive(src + '/' + name, dst + '/' + name)) return false;
+        }
+        return true;
+    }
+    return QFile::copy(src, dst);
+}
+
+static bool removeAny(const QString &path) {
+    QFileInfo fi(path);
+    if (fi.isDir() && !fi.isSymLink()) return QDir(path).removeRecursively();
+    return QFile::remove(path);
+}
+
+static bool moveItem(const QString &src, const QString &dst) {
+    if (QFile::rename(src, dst)) return true;
+    if (!copyRecursive(src, dst)) return false;
+    return removeAny(src);
+}
 
 MainWindow::MainWindow(const QString &leftPath, const QString &rightPath,
                        QWidget *parent)
@@ -22,19 +59,46 @@ MainWindow::MainWindow(const QString &leftPath, const QString &rightPath,
     splitter->setStretchFactor(2, 1);
     setCentralWidget(splitter);
 
+    connect(m_left,  &ListerWidget::pathChanged, this, [this](const QString&) { updateTitle(); });
+    connect(m_right, &ListerWidget::pathChanged, this, [this](const QString&) { updateTitle(); });
+
+    wireLister(m_left);
+    wireLister(m_right);
+
     connect(m_bank, &ButtonBank::parentClicked,  this, [this]{ if (m_active) m_active->goParent();   });
     connect(m_bank, &ButtonBank::rootClicked,    this, [this]{ if (m_active) m_active->goRoot();     });
     connect(m_bank, &ButtonBank::refreshClicked, this, [this]{ if (m_active) m_active->refresh();    });
     connect(m_bank, &ButtonBank::allClicked,     this, [this]{ if (m_active) m_active->selectAll();  });
     connect(m_bank, &ButtonBank::noneClicked,    this, [this]{ if (m_active) m_active->selectNone(); });
 
-    connect(m_left,  &ListerWidget::pathChanged, this, [this](const QString&) { updateTitle(); });
-    connect(m_right, &ListerWidget::pathChanged, this, [this](const QString&) { updateTitle(); });
+    connect(m_bank, &ButtonBank::copyClicked,    this, [this]{ if (m_active) doCopy(m_active);    });
+    connect(m_bank, &ButtonBank::moveClicked,    this, [this]{ if (m_active) doMove(m_active);    });
+    connect(m_bank, &ButtonBank::deleteClicked,  this, [this]{ if (m_active) doDelete(m_active);  });
+    connect(m_bank, &ButtonBank::renameClicked,  this, [this]{ if (m_active) doRename(m_active);  });
+    connect(m_bank, &ButtonBank::makeDirClicked, this, [this]{ if (m_active) doMakeDir(m_active); });
+    connect(m_bank, &ButtonBank::infoClicked,    this, [this]{ if (m_active) doInfo(m_active);    });
+    connect(m_bank, &ButtonBank::filterClicked,  this, [this]{ if (m_active) doFilter(m_active);  });
 
     connect(qApp, &QApplication::focusChanged,
             this, &MainWindow::onFocusChanged);
 
     setActive(m_left);
+}
+
+void MainWindow::wireLister(ListerWidget *l) {
+    connect(l, &ListerWidget::copyRequested,    this, &MainWindow::doCopy);
+    connect(l, &ListerWidget::moveRequested,    this, &MainWindow::doMove);
+    connect(l, &ListerWidget::deleteRequested,  this, &MainWindow::doDelete);
+    connect(l, &ListerWidget::renameRequested,  this, &MainWindow::doRename);
+    connect(l, &ListerWidget::makeDirRequested, this, &MainWindow::doMakeDir);
+    connect(l, &ListerWidget::infoRequested,    this, &MainWindow::doInfo);
+    connect(l, &ListerWidget::filterRequested,  this, &MainWindow::doFilter);
+}
+
+ListerWidget *MainWindow::peerOf(ListerWidget *lister) const {
+    if (lister == m_left)  return m_right;
+    if (lister == m_right) return m_left;
+    return nullptr;
 }
 
 void MainWindow::setActive(ListerWidget *lister) {
@@ -55,5 +119,173 @@ void MainWindow::onFocusChanged(QWidget * /*old*/, QWidget *now) {
         if (w == m_left)  { setActive(m_left);  return; }
         if (w == m_right) { setActive(m_right); return; }
     }
-    /* focus went elsewhere — keep current active */
+}
+
+/* --- File operations --- */
+
+void MainWindow::doCopy(ListerWidget *src) {
+    if (!src) return;
+    ListerWidget *dst = peerOf(src);
+    if (!dst) return;
+    const QStringList items = src->selectedPaths();
+    if (items.isEmpty()) {
+        QMessageBox::information(this, tr("Copy"), tr("Nothing selected."));
+        return;
+    }
+    const QString dstDir = dst->currentPath();
+    int ok = 0, fail = 0, skipped = 0;
+    for (const QString &path : items) {
+        QFileInfo si(path);
+        QString target = dstDir + '/' + si.fileName();
+        if (QFileInfo::exists(target)) { ++skipped; continue; }
+        if (copyRecursive(path, target)) ++ok;
+        else ++fail;
+    }
+    dst->refresh();
+    if (fail || skipped) {
+        QMessageBox::warning(this, tr("Copy"),
+            tr("%1 copied, %2 skipped (already exists), %3 failed")
+              .arg(ok).arg(skipped).arg(fail));
+    }
+}
+
+void MainWindow::doMove(ListerWidget *src) {
+    if (!src) return;
+    ListerWidget *dst = peerOf(src);
+    if (!dst) return;
+    const QStringList items = src->selectedPaths();
+    if (items.isEmpty()) {
+        QMessageBox::information(this, tr("Move"), tr("Nothing selected."));
+        return;
+    }
+    const QString dstDir = dst->currentPath();
+    int ok = 0, fail = 0, skipped = 0;
+    for (const QString &path : items) {
+        QFileInfo si(path);
+        QString target = dstDir + '/' + si.fileName();
+        if (QFileInfo::exists(target)) { ++skipped; continue; }
+        if (moveItem(path, target)) ++ok;
+        else ++fail;
+    }
+    src->refresh();
+    dst->refresh();
+    if (fail || skipped) {
+        QMessageBox::warning(this, tr("Move"),
+            tr("%1 moved, %2 skipped (already exists), %3 failed")
+              .arg(ok).arg(skipped).arg(fail));
+    }
+}
+
+void MainWindow::doDelete(ListerWidget *src) {
+    if (!src) return;
+    const QStringList items = src->selectedPaths();
+    if (items.isEmpty()) {
+        QMessageBox::information(this, tr("Delete"), tr("Nothing selected."));
+        return;
+    }
+    auto ret = QMessageBox::question(this, tr("Delete"),
+        tr("Move %n item(s) to Trash?", "", items.size()),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
+    if (ret != QMessageBox::Yes) return;
+    int ok = 0, fail = 0;
+    for (const QString &p : items) {
+        if (QFile::moveToTrash(p)) ++ok;
+        else ++fail;
+    }
+    src->refresh();
+    if (fail) {
+        QMessageBox::warning(this, tr("Delete"),
+            tr("%1 moved to Trash, %2 failed").arg(ok).arg(fail));
+    }
+}
+
+void MainWindow::doRename(ListerWidget *src) {
+    if (!src) return;
+    const QStringList items = src->selectedPaths();
+    if (items.size() != 1) {
+        QMessageBox::information(this, tr("Rename"),
+            tr("Select exactly one item to rename."));
+        return;
+    }
+    QFileInfo fi(items.first());
+    bool ok;
+    QString newName = QInputDialog::getText(this, tr("Rename"),
+        tr("New name:"), QLineEdit::Normal, fi.fileName(), &ok);
+    if (!ok || newName.isEmpty() || newName == fi.fileName()) return;
+    if (newName.contains('/')) {
+        QMessageBox::warning(this, tr("Rename"), tr("Name may not contain '/'."));
+        return;
+    }
+    QString newPath = fi.absolutePath() + '/' + newName;
+    if (QFile::rename(items.first(), newPath)) {
+        src->refresh();
+    } else {
+        QMessageBox::warning(this, tr("Rename"), tr("Rename failed."));
+    }
+}
+
+void MainWindow::doMakeDir(ListerWidget *src) {
+    if (!src) return;
+    bool ok;
+    QString name = QInputDialog::getText(this, tr("New Folder"),
+        tr("Folder name:"), QLineEdit::Normal, tr("New Folder"), &ok);
+    if (!ok || name.isEmpty()) return;
+    if (name.contains('/')) {
+        QMessageBox::warning(this, tr("New Folder"), tr("Name may not contain '/'."));
+        return;
+    }
+    QDir dir(src->currentPath());
+    if (dir.mkdir(name)) {
+        src->refresh();
+    } else {
+        QMessageBox::warning(this, tr("New Folder"), tr("Could not create folder."));
+    }
+}
+
+void MainWindow::doInfo(ListerWidget *src) {
+    if (!src) return;
+    const QStringList items = src->selectedPaths();
+    if (items.isEmpty()) {
+        QMessageBox::information(this, tr("Info"), tr("Nothing selected."));
+        return;
+    }
+    QString text;
+    if (items.size() == 1) {
+        QFileInfo fi(items.first());
+        text = tr("<b>%1</b><br>"
+                  "Path: %2<br>"
+                  "Size: %3 bytes<br>"
+                  "Modified: %4<br>"
+                  "Type: %5<br>"
+                  "Permissions: %6")
+            .arg(fi.fileName())
+            .arg(fi.absolutePath())
+            .arg(fi.size())
+            .arg(fi.lastModified().toString(Qt::ISODate))
+            .arg(fi.isSymLink() ? tr("Symlink")
+                 : fi.isDir()   ? tr("Directory")
+                                : tr("File"))
+            .arg(QString::number(fi.permissions() & 0777, 8));
+    } else {
+        qint64 total = 0;
+        int files = 0, dirs = 0;
+        for (const QString &p : items) {
+            QFileInfo fi(p);
+            if (fi.isDir()) ++dirs;
+            else { ++files; total += fi.size(); }
+        }
+        text = tr("<b>%1 items</b><br>%2 files · %3 directories<br>Total: %4 bytes")
+                 .arg(items.size()).arg(files).arg(dirs).arg(total);
+    }
+    QMessageBox::information(this, tr("Info"), text);
+}
+
+void MainWindow::doFilter(ListerWidget *src) {
+    if (!src) return;
+    bool ok;
+    QString pattern = QInputDialog::getText(this, tr("Filter"),
+        tr("Show pattern (glob, e.g. *.txt — empty clears filter):"),
+        QLineEdit::Normal, QString(), &ok);
+    if (!ok) return;
+    src->applyFilter(pattern);
 }
