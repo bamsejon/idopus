@@ -6,6 +6,7 @@
 class QTreeView;
 class QLineEdit;
 class QPushButton;
+class QLabel;
 class QModelIndex;
 class DirBufferModel;
 
@@ -32,6 +33,7 @@ signals:
 private slots:
     void onDoubleClicked(const QModelIndex &index);
     void onPathEdited();
+    void updateStatus();
 
 private:
     QPushButton *makeButton(const QString &text, bool enabled);
@@ -52,5 +54,8 @@ private:
     QPushButton    *m_makeDirBtn = nullptr;
     QPushButton    *m_infoBtn    = nullptr;
     QPushButton    *m_filterBtn  = nullptr;
+    QLabel         *m_stateBadge  = nullptr;
+    QLabel         *m_statusLabel = nullptr;
+    bool            m_active      = false;
     QString         m_path;
 };

@@ -80,3 +80,13 @@ const dir_entry *DirBufferModel::entryAt(int row) const {
     if (!m_buf) return nullptr;
     return dir_buffer_get_entry(m_buf, row);
 }
+
+DirBufferModel::Stats DirBufferModel::stats() const {
+    Stats s;
+    if (m_buf) {
+        s.total_files = m_buf->stats.total_files;
+        s.total_dirs  = m_buf->stats.total_dirs;
+        s.total_bytes = m_buf->stats.total_bytes;
+    }
+    return s;
+}
