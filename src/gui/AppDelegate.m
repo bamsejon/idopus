@@ -62,6 +62,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
 - (void)toggleHidden:(id)sender;
 - (void)toggleButtonBank:(id)sender;
 - (void)selectPatternAction:(id)sender;
+- (void)compareSourceWithDestAction:(id)sender;
 - (void)runCustomButton:(NSButton *)sender;
 - (void)addCustomButtonAction:(id)sender;
 - (void)removeCustomButtonAction:(id)sender;
@@ -2152,6 +2153,9 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
                                                  action:@selector(selectPatternAction:)
                                           keyEquivalent:@"a"];
     selectItem.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
+    [funcMenu addItemWithTitle:@"Compare With Destination"
+                        action:@selector(compareSourceWithDestAction:)
+                 keyEquivalent:@""];
     [funcMenu addItem:[NSMenuItem separatorItem]];
     [funcMenu addItemWithTitle:@"Add Custom Button…"    action:@selector(addCustomButtonAction:)    keyEquivalent:@""];
     [funcMenu addItemWithTitle:@"Edit Custom Button…"   action:@selector(editCustomButtonAction:)   keyEquivalent:@""];
@@ -2936,6 +2940,50 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     [updated removeObjectAtIndex:idx];
     [[NSUserDefaults standardUserDefaults] setObject:updated forKey:@"customButtons"];
     [_buttonBankPanel rebuildGrid];
+}
+
+/* Compare Source with Destination — DOpus classic. Selects, in the SOURCE
+ * Lister, every entry whose name doesn't appear in the DEST Lister's
+ * visible buffer. Quick way to see "what's missing over there". */
+- (void)compareSourceWithDestAction:(id)sender {
+    ListerWindowController *src = _activeSource;
+    ListerWindowController *dst = _activeDest;
+    if (!src || !dst) {
+        [self showAlert:@"Compare"
+                   info:@"Need both a SOURCE and DEST Lister. Open a second Lister (⌘N) or use Split Display (⇧⌘N)."
+                  style:NSAlertStyleInformational];
+        return;
+    }
+    if (!src.dataSource.buffer || !dst.dataSource.buffer) return;
+
+    /* Build a name set from the destination buffer */
+    NSMutableSet<NSString *> *destNames = [NSMutableSet set];
+    int dtotal = dst.dataSource.buffer->stats.total_entries;
+    for (int i = 0; i < dtotal; i++) {
+        dir_entry_t *e = dir_buffer_get_entry(dst.dataSource.buffer, i);
+        if (e && e->name) [destNames addObject:[NSString stringWithUTF8String:e->name]];
+    }
+
+    /* Select source entries whose name isn't in destNames */
+    NSMutableIndexSet *idx = [NSMutableIndexSet indexSet];
+    int stotal = src.dataSource.buffer->stats.total_entries;
+    for (int i = 0; i < stotal; i++) {
+        dir_entry_t *e = dir_buffer_get_entry(src.dataSource.buffer, i);
+        if (!e || !e->name) continue;
+        NSString *name = [NSString stringWithUTF8String:e->name];
+        if (![destNames containsObject:name]) [idx addIndex:(NSUInteger)i];
+    }
+
+    [src.tableView selectRowIndexes:idx byExtendingSelection:NO];
+    if (idx.firstIndex != NSNotFound) {
+        [src.tableView scrollRowToVisible:(NSInteger)idx.firstIndex];
+    }
+    [src.window makeKeyAndOrderFront:nil];
+
+    [self showAlert:@"Compare Source with Destination"
+               info:[NSString stringWithFormat:@"%lu item%@ in SOURCE not present in DEST (by name).",
+                     (unsigned long)idx.count, idx.count == 1 ? @"" : @"s"]
+              style:NSAlertStyleInformational];
 }
 
 - (void)selectPatternAction:(id)sender {
