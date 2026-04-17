@@ -63,6 +63,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
 - (void)toggleButtonBank:(id)sender;
 - (void)selectPatternAction:(id)sender;
 - (void)compareSourceWithDestAction:(id)sender;
+- (void)goToPathAction:(id)sender;
 - (void)runCustomButton:(NSButton *)sender;
 - (void)addCustomButtonAction:(id)sender;
 - (void)removeCustomButtonAction:(id)sender;
@@ -1554,13 +1555,19 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
  * to text-edit mode so the user can type an arbitrary path. */
 - (void)pathControlDoubleClick:(NSPathControl *)sender {
     if (sender.clickedPathItem) return;   /* segment click, not bg */
-    [self enterPathEditMode];
+    [self enterPathEditMode:self];
 }
 
-- (void)enterPathEditMode {
+- (void)enterPathEditMode:(id)sender {
     _pathField.stringValue = _currentPath;
+    _pathField.bezeled = YES;
+    _pathField.drawsBackground = YES;
+    _pathField.backgroundColor = [NSColor textBackgroundColor];
+    _pathField.textColor = [NSColor labelColor];
     _pathField.hidden = NO;
     _pathControl.hidden = YES;
+    /* Bring field on top of the (hidden) control so it's the visible/hit layer */
+    [_pathField.superview addSubview:_pathField positioned:NSWindowAbove relativeTo:_pathControl];
     [self.window makeFirstResponder:_pathField];
     [_pathField selectText:nil];
 }
@@ -2172,7 +2179,11 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     [fileMenu addItemWithTitle:@"Back"    action:@selector(goBack:)    keyEquivalent:@"["];
     [fileMenu addItemWithTitle:@"Forward" action:@selector(goForward:) keyEquivalent:@"]"];
     [fileMenu addItem:[NSMenuItem separatorItem]];
-    [fileMenu addItemWithTitle:@"Find"    action:@selector(performFindPanelAction:) keyEquivalent:@"f"];
+    [fileMenu addItemWithTitle:@"Find"      action:@selector(performFindPanelAction:) keyEquivalent:@"f"];
+    NSMenuItem *gotoItem = [fileMenu addItemWithTitle:@"Go to Path…"
+                                               action:@selector(goToPathAction:)
+                                        keyEquivalent:@"l"];
+    gotoItem.target = self;
     [fileMenu addItem:[NSMenuItem separatorItem]];
     [fileMenu addItemWithTitle:@"Close" action:@selector(performClose:) keyEquivalent:@"w"];
     fileItem.submenu = fileMenu;
@@ -2989,6 +3000,33 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
 /* Compare Source with Destination — DOpus classic. Selects, in the SOURCE
  * Lister, every entry whose name doesn't appear in the DEST Lister's
  * visible buffer. Quick way to see "what's missing over there". */
+- (void)goToPathAction:(id)sender {
+    ListerWindowController *src = [self sourceOrOperating];
+    if (!src) return;
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Go to Path";
+    alert.informativeText = @"Type a path — ~/ and $HOME expand.";
+    NSTextField *input = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 420, 24)];
+    input.stringValue = src.currentPath;
+    alert.accessoryView = input;
+    [alert addButtonWithTitle:@"Go"];
+    [alert addButtonWithTitle:@"Cancel"];
+    [alert.window setInitialFirstResponder:input];
+    [input selectText:nil];
+
+    if ([alert runModal] != NSAlertFirstButtonReturn) return;
+
+    NSString *path = [input.stringValue stringByExpandingTildeInPath];
+    path = [path stringByStandardizingPath];
+    if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+        [self showAlert:@"Go to Path" info:[NSString stringWithFormat:@"No such path: %@", path]
+                  style:NSAlertStyleWarning];
+        return;
+    }
+    [src loadPath:path];
+}
+
 - (void)compareSourceWithDestAction:(id)sender {
     ListerWindowController *src = _activeSource;
     ListerWindowController *dst = _activeDest;
