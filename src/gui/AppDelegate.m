@@ -60,6 +60,9 @@ typedef NS_ENUM(NSInteger, ListerState) {
 - (void)toggleButtonBank:(id)sender;
 - (void)selectPatternAction:(id)sender;
 - (void)toggleQuickLook:(id)sender;
+- (void)sortByAction:(NSMenuItem *)sender;
+- (void)toggleReverseSortAction:(id)sender;
+- (void)toggleFilesMixedAction:(id)sender;
 - (void)navigateToBookmark:(NSMenuItem *)sender;
 - (void)addCurrentBookmark:(id)sender;
 - (void)removeBookmark:(id)sender;
@@ -530,6 +533,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
     NSMenuItem *openWith = [menu addItemWithTitle:@"Open With" action:NULL keyEquivalent:@""];
     openWith.submenu = [[NSMenu alloc] initWithTitle:@"Open With"];
     [menu addItemWithTitle:@"Reveal in Finder" action:@selector(revealInFinderAction:) keyEquivalent:@""].target = self;
+    [menu addItemWithTitle:@"Open in Terminal" action:@selector(openInTerminalAction:) keyEquivalent:@""].target = self;
     [menu addItemWithTitle:@"Copy Path"       action:@selector(copyPathAction:) keyEquivalent:@""].target = self;
     [menu addItem:[NSMenuItem separatorItem]];
     [menu addItemWithTitle:@"Duplicate"       action:@selector(duplicateAction:) keyEquivalent:@""].target = self;
@@ -841,6 +845,23 @@ typedef NS_ENUM(NSInteger, ListerState) {
                        withApplicationAtURL:appURL
                               configuration:cfg
                           completionHandler:nil];
+}
+
+/* Open a Terminal window at the clicked directory (or, if a file is clicked,
+ * at its parent directory; or at the Lister's currentPath if nothing). */
+- (void)openInTerminalAction:(id)sender {
+    NSString *target = [self pathForContextClick];
+    if (target) {
+        BOOL isDir = NO;
+        [[NSFileManager defaultManager] fileExistsAtPath:target isDirectory:&isDir];
+        if (!isDir) target = [target stringByDeletingLastPathComponent];
+    } else {
+        target = _currentPath;
+    }
+    NSTask *task = [[NSTask alloc] init];
+    task.executableURL = [NSURL fileURLWithPath:@"/usr/bin/open"];
+    task.arguments = @[@"-a", @"Terminal", target];
+    [task launchAndReturnError:nil];
 }
 
 - (void)copyPathAction:(id)sender {
@@ -1589,6 +1610,27 @@ typedef NS_ENUM(NSInteger, ListerState) {
     NSMenuItem *viewItem = [[NSMenuItem alloc] init];
     NSMenu *viewMenu = [[NSMenu alloc] initWithTitle:@"View"];
     [viewMenu addItemWithTitle:@"Show Hidden Files" action:@selector(toggleHidden:) keyEquivalent:@"."];
+
+    /* Sort By submenu */
+    NSMenuItem *sortItem = [viewMenu addItemWithTitle:@"Sort By" action:NULL keyEquivalent:@""];
+    NSMenu *sortSub = [[NSMenu alloc] initWithTitle:@"Sort By"];
+    struct { NSString *title; int field; } sorts[] = {
+        { @"Name",      SORT_NAME      },
+        { @"Size",      SORT_SIZE      },
+        { @"Date",      SORT_DATE      },
+        { @"Type",      SORT_EXTENSION },
+    };
+    for (size_t i = 0; i < sizeof(sorts)/sizeof(sorts[0]); i++) {
+        NSMenuItem *mi = [sortSub addItemWithTitle:sorts[i].title
+                                            action:@selector(sortByAction:)
+                                     keyEquivalent:@""];
+        mi.tag = sorts[i].field;
+    }
+    [sortSub addItem:[NSMenuItem separatorItem]];
+    [sortSub addItemWithTitle:@"Reverse"      action:@selector(toggleReverseSortAction:) keyEquivalent:@""];
+    [sortSub addItemWithTitle:@"Files Mixed"  action:@selector(toggleFilesMixedAction:) keyEquivalent:@""];
+    sortItem.submenu = sortSub;
+
     [viewMenu addItem:[NSMenuItem separatorItem]];
     NSMenuItem *qlItem = [viewMenu addItemWithTitle:@"Quick Look"
                                              action:@selector(toggleQuickLook:)
@@ -2020,6 +2062,37 @@ typedef NS_ENUM(NSInteger, ListerState) {
     NSString *pattern = [input.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
     if (pattern.length == 0) return;
     [src selectByPattern:pattern];
+}
+
+- (void)sortByAction:(NSMenuItem *)sender {
+    ListerWindowController *src = [self sourceOrOperating];
+    if (!src || !src.dataSource.buffer) return;
+    sort_field_t field = (sort_field_t)sender.tag;
+    dir_buffer_t *b = src.dataSource.buffer;
+    dir_buffer_set_sort(b, field,
+                        (b->format.sort.flags & SORTF_REVERSE) != 0,
+                        b->format.sort.separation);
+    [src.tableView reloadData];
+}
+
+- (void)toggleReverseSortAction:(id)sender {
+    ListerWindowController *src = [self sourceOrOperating];
+    if (!src || !src.dataSource.buffer) return;
+    dir_buffer_t *b = src.dataSource.buffer;
+    bool currentRev = (b->format.sort.flags & SORTF_REVERSE) != 0;
+    dir_buffer_set_sort(b, b->format.sort.field, !currentRev, b->format.sort.separation);
+    [src.tableView reloadData];
+}
+
+- (void)toggleFilesMixedAction:(id)sender {
+    ListerWindowController *src = [self sourceOrOperating];
+    if (!src || !src.dataSource.buffer) return;
+    dir_buffer_t *b = src.dataSource.buffer;
+    separation_t next = (b->format.sort.separation == SEPARATE_MIX) ? SEPARATE_DIRS_FIRST : SEPARATE_MIX;
+    dir_buffer_set_sort(b, b->format.sort.field,
+                        (b->format.sort.flags & SORTF_REVERSE) != 0,
+                        next);
+    [src.tableView reloadData];
 }
 
 - (void)toggleHidden:(id)sender {
