@@ -2,6 +2,10 @@
  * iDOpus — PAL File System implementation (macOS/POSIX)
  */
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE  /* needed on glibc for FNM_CASEFOLD */
+#endif
+
 #include "pal/pal_file.h"
 #include "pal/pal_strings.h"
 #include "pal/pal_memory.h"
@@ -10,14 +14,20 @@
 #include <stdlib.h>
 #include <string.h>
 #include <dirent.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
-#include <sys/mount.h>
 #include <unistd.h>
 #include <fnmatch.h>
 #include <libgen.h>
-#include <copyfile.h>
 #include <errno.h>
+
+#ifdef __APPLE__
+#include <sys/mount.h>
+#include <copyfile.h>
+#else
+#include <mntent.h>
+#endif
 
 /* --- Directory scanning --- */
 
@@ -46,7 +56,11 @@ static void fill_info_from_stat(const char *fullpath, const char *name,
     pal_strlcpy(info->path, fullpath, sizeof(info->path));
     info->size = st->st_size;
     info->date_modified = st->st_mtime;
+#ifdef __APPLE__
     info->date_created = st->st_birthtime;  /* macOS-specific */
+#else
+    info->date_created = st->st_mtime;      /* Linux struct stat has no birthtime */
+#endif
     info->date_accessed = st->st_atime;
     info->permissions = st->st_mode & 0777;
     info->hidden = (name[0] == '.');
@@ -127,8 +141,36 @@ bool pal_file_rename(const char *old_path, const char *new_path)
 
 bool pal_file_copy(const char *src, const char *dst)
 {
+    if (!src || !dst) return false;
+#ifdef __APPLE__
     /* macOS copyfile() handles metadata, xattrs, ACLs */
-    return src && dst && copyfile(src, dst, NULL, COPYFILE_ALL) == 0;
+    return copyfile(src, dst, NULL, COPYFILE_ALL) == 0;
+#else
+    /* POSIX read/write loop. MVP only — xattrs/ACLs not preserved. */
+    int s = open(src, O_RDONLY);
+    if (s < 0) return false;
+    struct stat st;
+    if (fstat(s, &st) != 0) { close(s); return false; }
+    int d = open(dst, O_WRONLY | O_CREAT | O_TRUNC, st.st_mode & 0777);
+    if (d < 0) { close(s); return false; }
+    char buf[65536];
+    ssize_t n;
+    bool ok = true;
+    while ((n = read(s, buf, sizeof buf)) > 0) {
+        ssize_t w = 0;
+        while (w < n) {
+            ssize_t k = write(d, buf + w, n - w);
+            if (k <= 0) { ok = false; break; }
+            w += k;
+        }
+        if (!ok) break;
+    }
+    if (n < 0) ok = false;
+    close(s);
+    close(d);
+    if (!ok) unlink(dst);
+    return ok;
+#endif
 }
 
 bool pal_file_move(const char *src, const char *dst)
@@ -220,6 +262,7 @@ bool pal_path_match(const char *pattern, const char *name)
 
 int pal_volumes_list(pal_volume_t *volumes, int max_count)
 {
+#ifdef __APPLE__
     struct statfs *mounts;
     int n = getmntinfo(&mounts, MNT_NOWAIT);
     int count = 0;
@@ -242,6 +285,40 @@ int pal_volumes_list(pal_volume_t *volumes, int max_count)
                       strcmp(mounts[i].f_fstypename, "afpfs") == 0);
     }
     return count;
+#else
+    /* Linux: parse /proc/mounts; include block-device and network mounts only. */
+    FILE *fp = setmntent("/proc/mounts", "r");
+    if (!fp) return 0;
+    struct mntent *m;
+    int count = 0;
+    while ((m = getmntent(fp)) && count < max_count) {
+        bool is_dev = (strncmp(m->mnt_fsname, "/dev/", 5) == 0);
+        bool is_net = (strcmp(m->mnt_type, "nfs")    == 0 ||
+                       strcmp(m->mnt_type, "nfs4")   == 0 ||
+                       strcmp(m->mnt_type, "cifs")   == 0 ||
+                       strcmp(m->mnt_type, "smbfs")  == 0);
+        if (!is_dev && !is_net) continue;
+
+        pal_volume_t *v = &volumes[count++];
+        pal_strlcpy(v->mount_point, m->mnt_dir,  sizeof(v->mount_point));
+        pal_strlcpy(v->filesystem,  m->mnt_type, sizeof(v->filesystem));
+        const char *name = pal_path_filename(m->mnt_dir);
+        pal_strlcpy(v->name, (name && *name) ? name : "/", sizeof(v->name));
+
+        struct statvfs sf;
+        if (statvfs(m->mnt_dir, &sf) == 0) {
+            v->total_bytes = (uint64_t)sf.f_blocks * sf.f_frsize;
+            v->free_bytes  = (uint64_t)sf.f_bavail * sf.f_frsize;
+        } else {
+            v->total_bytes = 0;
+            v->free_bytes  = 0;
+        }
+        v->removable = false;   /* no reliable detection without udev */
+        v->network   = is_net;
+    }
+    endmntent(fp);
+    return count;
+#endif
 }
 
 /* --- File I/O --- */

@@ -1,8 +1,12 @@
 cmake_minimum_required(VERSION 3.20)
-project(idopus VERSION 1.8.0 LANGUAGES C)
+project(idopus VERSION 1.8.0 LANGUAGES C CXX)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
 # macOS ARM target
 if(APPLE)
@@ -98,5 +102,34 @@ if(APPLE)
         endif()
     else()
         message(STATUS "rclone binary not found at ${RCLONE_BIN} — run scripts/fetch-rclone.sh to bundle it")
+    endif()
+endif()
+
+# --- Qt6 GUI app (Linux / non-Apple) ---
+if(NOT APPLE)
+    option(BUILD_QT_GUI "Build Qt6 GUI on non-Apple platforms" ON)
+    if(BUILD_QT_GUI)
+        find_package(Qt6 6.5 COMPONENTS Core Widgets)
+        if(Qt6_FOUND)
+            qt_standard_project_setup()
+            qt_add_executable(idopus-qt
+                src/gui/qt/main.cpp
+                src/gui/qt/MainWindow.cpp
+                src/gui/qt/MainWindow.h
+                src/gui/qt/ListerWidget.cpp
+                src/gui/qt/ListerWidget.h
+                src/gui/qt/DirBufferModel.cpp
+                src/gui/qt/DirBufferModel.h
+            )
+            set_target_properties(idopus-qt PROPERTIES
+                AUTOMOC ON
+                WIN32_EXECUTABLE OFF
+                MACOSX_BUNDLE OFF
+            )
+            target_link_libraries(idopus-qt PRIVATE
+                core pal Qt6::Widgets pthread)
+        else()
+            message(STATUS "Qt6 not found — skipping idopus-qt target")
+        endif()
     endif()
 endif()
