@@ -27,7 +27,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
 
 /* --- App Delegate --- */
 
-@interface IDOpusAppDelegate : NSObject <NSApplicationDelegate>
+@interface IDOpusAppDelegate : NSObject <NSApplicationDelegate, NSMenuDelegate>
 @property (nonatomic) buffer_cache_t *bufferCache;
 @property (nonatomic, strong) NSMutableArray<ListerWindowController *> *listerControllers;
 @property (nonatomic, weak) ListerWindowController *activeSource;
@@ -59,6 +59,9 @@ typedef NS_ENUM(NSInteger, ListerState) {
 - (void)toggleButtonBank:(id)sender;
 - (void)selectPatternAction:(id)sender;
 - (void)toggleQuickLook:(id)sender;
+- (void)navigateToBookmark:(NSMenuItem *)sender;
+- (void)addCurrentBookmark:(id)sender;
+- (void)removeBookmark:(id)sender;
 @end
 
 #pragma mark - Lister Table Data
@@ -1092,6 +1095,14 @@ typedef NS_ENUM(NSInteger, ListerState) {
     funcItem.submenu = funcMenu;
     [mainMenu addItem:funcItem];
 
+    /* Bookmarks menu */
+    NSMenuItem *bmItem = [[NSMenuItem alloc] init];
+    NSMenu *bmMenu = [[NSMenu alloc] initWithTitle:@"Bookmarks"];
+    bmMenu.autoenablesItems = NO;
+    bmMenu.delegate = self;     /* rebuild on open */
+    bmItem.submenu = bmMenu;
+    [mainMenu addItem:bmItem];
+
     /* View menu */
     NSMenuItem *viewItem = [[NSMenuItem alloc] init];
     NSMenu *viewMenu = [[NSMenu alloc] initWithTitle:@"View"];
@@ -1220,6 +1231,131 @@ typedef NS_ENUM(NSInteger, ListerState) {
 - (void)refreshAction:(id)sender { [[self sourceOrOperating] refresh:sender]; }
 - (void)allAction:(id)sender     { [[self sourceOrOperating] selectAllFiles:sender]; }
 - (void)noneAction:(id)sender    { [[self sourceOrOperating] deselectAllFiles:sender]; }
+
+#pragma mark Bookmarks
+
+/* Standard system locations, plus user additions persisted to NSUserDefaults.
+ * User additions are stored as an NSArray of NSDictionary{name, path} under
+ * "bookmarks" in standardUserDefaults. */
+- (NSArray<NSDictionary *> *)builtInBookmarks {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSArray<NSNumber *> *dirs = @[ @(NSDesktopDirectory), @(NSDocumentDirectory),
+                                    @(NSDownloadsDirectory), @(NSApplicationDirectory),
+                                    @(NSPicturesDirectory), @(NSMoviesDirectory),
+                                    @(NSMusicDirectory) ];
+    NSArray<NSString *> *names = @[ @"Desktop", @"Documents", @"Downloads",
+                                     @"Applications", @"Pictures", @"Movies", @"Music" ];
+    NSMutableArray<NSDictionary *> *out = [NSMutableArray array];
+    [out addObject:@{ @"name": @"Home", @"path": NSHomeDirectory() }];
+    for (NSUInteger i = 0; i < dirs.count; i++) {
+        NSArray<NSURL *> *u = [fm URLsForDirectory:dirs[i].unsignedIntegerValue
+                                         inDomains:NSUserDomainMask];
+        if (u.count > 0) [out addObject:@{ @"name": names[i], @"path": u.firstObject.path }];
+    }
+    return out;
+}
+
+- (NSArray<NSDictionary *> *)userBookmarks {
+    return [[NSUserDefaults standardUserDefaults] arrayForKey:@"bookmarks"] ?: @[];
+}
+
+- (void)setUserBookmarks:(NSArray<NSDictionary *> *)bookmarks {
+    [[NSUserDefaults standardUserDefaults] setObject:bookmarks forKey:@"bookmarks"];
+}
+
+- (void)menuNeedsUpdate:(NSMenu *)menu {
+    if (![menu.title isEqualToString:@"Bookmarks"]) return;
+    [menu removeAllItems];
+
+    for (NSDictionary *bm in [self builtInBookmarks]) {
+        NSMenuItem *it = [menu addItemWithTitle:bm[@"name"]
+                                         action:@selector(navigateToBookmark:)
+                                  keyEquivalent:@""];
+        it.representedObject = bm[@"path"];
+        it.target = self;
+    }
+
+    NSArray<NSDictionary *> *userBm = [self userBookmarks];
+    if (userBm.count > 0) {
+        [menu addItem:[NSMenuItem separatorItem]];
+        for (NSDictionary *bm in userBm) {
+            NSMenuItem *it = [menu addItemWithTitle:bm[@"name"] ?: bm[@"path"]
+                                             action:@selector(navigateToBookmark:)
+                                      keyEquivalent:@""];
+            it.representedObject = bm[@"path"];
+            it.target = self;
+        }
+    }
+
+    [menu addItem:[NSMenuItem separatorItem]];
+    NSMenuItem *add = [menu addItemWithTitle:@"Add Current…"
+                                      action:@selector(addCurrentBookmark:)
+                               keyEquivalent:@"d"];
+    add.target = self;
+
+    if (userBm.count > 0) {
+        NSMenuItem *rm = [menu addItemWithTitle:@"Remove Bookmark…"
+                                         action:@selector(removeBookmark:)
+                                  keyEquivalent:@""];
+        rm.target = self;
+    }
+}
+
+- (void)navigateToBookmark:(NSMenuItem *)sender {
+    NSString *path = sender.representedObject;
+    ListerWindowController *target = [self sourceOrOperating];
+    if (!target || !path) return;
+    [target loadPath:path];
+}
+
+- (void)addCurrentBookmark:(id)sender {
+    ListerWindowController *src = [self sourceOrOperating];
+    if (!src) return;
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Add Bookmark";
+    alert.informativeText = [NSString stringWithFormat:@"Path: %@", src.currentPath];
+    NSTextField *input = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 300, 24)];
+    input.stringValue = src.currentPath.lastPathComponent;
+    alert.accessoryView = input;
+    [alert addButtonWithTitle:@"Add"];
+    [alert addButtonWithTitle:@"Cancel"];
+    [alert.window setInitialFirstResponder:input];
+    [input selectText:nil];
+
+    if ([alert runModal] != NSAlertFirstButtonReturn) return;
+    NSString *name = [input.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    if (name.length == 0) return;
+
+    NSMutableArray *bms = [[self userBookmarks] mutableCopy];
+    [bms addObject:@{ @"name": name, @"path": src.currentPath }];
+    [self setUserBookmarks:bms];
+}
+
+- (void)removeBookmark:(id)sender {
+    NSArray<NSDictionary *> *bms = [self userBookmarks];
+    if (bms.count == 0) return;
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Remove Bookmark";
+    alert.informativeText = @"Select which bookmark to remove.";
+
+    NSPopUpButton *popup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(0, 0, 320, 26)];
+    for (NSDictionary *bm in bms) {
+        [popup addItemWithTitle:[NSString stringWithFormat:@"%@ — %@",
+                                 bm[@"name"] ?: @"(unnamed)", bm[@"path"]]];
+    }
+    alert.accessoryView = popup;
+    [alert addButtonWithTitle:@"Remove"];
+    [alert addButtonWithTitle:@"Cancel"];
+
+    if ([alert runModal] != NSAlertFirstButtonReturn) return;
+    NSInteger idx = popup.indexOfSelectedItem;
+    if (idx < 0 || idx >= (NSInteger)bms.count) return;
+    NSMutableArray *updated = [bms mutableCopy];
+    [updated removeObjectAtIndex:idx];
+    [self setUserBookmarks:updated];
+}
 
 - (void)toggleQuickLook:(id)sender {
     QLPreviewPanel *panel = [QLPreviewPanel sharedPreviewPanel];
