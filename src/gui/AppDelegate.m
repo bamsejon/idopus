@@ -543,6 +543,135 @@ typedef NS_ENUM(NSInteger, ListerState) {
 
 @end
 
+#pragma mark - Progress Sheet (copy / move)
+
+/* Modal sheet attached to the source Lister, shown during long copy/move
+ * operations. Loop runs on a background queue; label and cancel button are
+ * updated/checked on the main queue. */
+@interface ProgressSheetController : NSWindowController
+@property (nonatomic, strong) NSTextField *titleLabel;
+@property (nonatomic, strong) NSTextField *fileLabel;
+@property (nonatomic, strong) NSProgressIndicator *spinner;
+@property (nonatomic, strong) NSButton *cancelButton;
+@property (atomic, assign) BOOL cancelled;
+
+- (void)runOperation:(BOOL)isMove
+               paths:(NSArray<NSString *> *)paths
+               names:(NSArray<NSString *> *)names
+              destDir:(NSString *)destDir
+          sourceWindow:(NSWindow *)srcWin
+           completion:(void (^)(NSArray<NSString *> *failed))completion;
+@end
+
+@implementation ProgressSheetController
+
+- (instancetype)init {
+    NSRect frame = NSMakeRect(0, 0, 440, 120);
+    NSWindow *w = [[NSWindow alloc] initWithContentRect:frame
+                                              styleMask:NSWindowStyleMaskTitled
+                                                backing:NSBackingStoreBuffered
+                                                  defer:NO];
+    self = [super initWithWindow:w];
+    if (!self) return nil;
+
+    NSView *content = w.contentView;
+    _titleLabel = [NSTextField labelWithString:@"Copying…"];
+    _titleLabel.font = [NSFont boldSystemFontOfSize:13];
+    _titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [content addSubview:_titleLabel];
+
+    _fileLabel = [NSTextField labelWithString:@""];
+    _fileLabel.font = [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightRegular];
+    _fileLabel.textColor = [NSColor secondaryLabelColor];
+    _fileLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    _fileLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [content addSubview:_fileLabel];
+
+    _spinner = [[NSProgressIndicator alloc] init];
+    _spinner.style = NSProgressIndicatorStyleBar;
+    _spinner.indeterminate = YES;
+    _spinner.translatesAutoresizingMaskIntoConstraints = NO;
+    [content addSubview:_spinner];
+
+    _cancelButton = [NSButton buttonWithTitle:@"Cancel" target:self action:@selector(cancel:)];
+    _cancelButton.keyEquivalent = @"\033";  /* Esc */
+    _cancelButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [content addSubview:_cancelButton];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [_titleLabel.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:16],
+        [_titleLabel.topAnchor constraintEqualToAnchor:content.topAnchor constant:12],
+        [_titleLabel.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-16],
+
+        [_fileLabel.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:16],
+        [_fileLabel.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-16],
+        [_fileLabel.topAnchor constraintEqualToAnchor:_titleLabel.bottomAnchor constant:4],
+
+        [_spinner.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:16],
+        [_spinner.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-16],
+        [_spinner.topAnchor constraintEqualToAnchor:_fileLabel.bottomAnchor constant:8],
+
+        [_cancelButton.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-16],
+        [_cancelButton.bottomAnchor constraintEqualToAnchor:content.bottomAnchor constant:-12],
+    ]];
+
+    return self;
+}
+
+- (void)cancel:(id)sender {
+    self.cancelled = YES;
+    _cancelButton.enabled = NO;
+    _titleLabel.stringValue = @"Cancelling…";
+}
+
+- (void)runOperation:(BOOL)isMove
+               paths:(NSArray<NSString *> *)paths
+               names:(NSArray<NSString *> *)names
+             destDir:(NSString *)destDir
+        sourceWindow:(NSWindow *)srcWin
+          completion:(void (^)(NSArray<NSString *> *))completion {
+
+    self.titleLabel.stringValue = isMove ? @"Moving…" : @"Copying…";
+    [self.spinner startAnimation:nil];
+
+    [srcWin beginSheet:self.window completionHandler:nil];
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSFileManager *fm = [NSFileManager defaultManager];
+        NSMutableArray<NSString *> *failed = [NSMutableArray array];
+
+        for (NSUInteger i = 0; i < paths.count; i++) {
+            if (self.cancelled) break;
+
+            NSString *name = names[i];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                self.fileLabel.stringValue = [NSString stringWithFormat:@"(%lu/%lu) %@",
+                                              (unsigned long)(i + 1),
+                                              (unsigned long)paths.count,
+                                              name];
+            });
+
+            NSString *from = paths[i];
+            NSString *to = [destDir stringByAppendingPathComponent:name];
+            NSError *err = nil;
+            BOOL ok = isMove
+                ? [fm moveItemAtPath:from toPath:to error:&err]
+                : [fm copyItemAtPath:from toPath:to error:&err];
+            if (!ok) {
+                [failed addObject:[NSString stringWithFormat:@"%@: %@", name, err.localizedDescription]];
+            }
+        }
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self.spinner stopAnimation:nil];
+            [srcWin endSheet:self.window];
+            if (completion) completion(failed);
+        });
+    });
+}
+
+@end
+
 #pragma mark - Button Bank Panel
 
 /* Floating Magellan-style panel with a grid of action buttons, shared across
@@ -1026,31 +1155,29 @@ typedef NS_ENUM(NSInteger, ListerState) {
         return;
     }
 
-    NSFileManager *fm = [NSFileManager defaultManager];
-    NSMutableArray<NSString *> *failed = [NSMutableArray array];
-    for (NSUInteger i = 0; i < paths.count; i++) {
-        NSString *from = paths[i];
-        NSString *to = [dst.currentPath stringByAppendingPathComponent:names[i]];
-        NSError *err = nil;
-        BOOL ok;
-        if (isMove) {
-            ok = [fm moveItemAtPath:from toPath:to error:&err];
-        } else {
-            ok = [fm copyItemAtPath:from toPath:to error:&err];
-        }
-        if (!ok) {
-            [failed addObject:[NSString stringWithFormat:@"%@: %@", names[i], err.localizedDescription]];
-        }
-    }
+    ProgressSheetController *sheet = [[ProgressSheetController alloc] init];
+    __weak typeof(self) weakSelf = self;
+    __block ProgressSheetController *keepAlive = sheet;  /* retain until completion */
+    [sheet runOperation:isMove
+                  paths:paths
+                  names:names
+                destDir:dst.currentPath
+           sourceWindow:src.window
+             completion:^(NSArray<NSString *> *failed) {
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf) { keepAlive = nil; return; }
 
-    [self refreshAllListersShowing:dst.currentPath];
-    if (isMove) [self refreshAllListersShowing:src.currentPath];
+        [strongSelf refreshAllListersShowing:dst.currentPath];
+        if (isMove) [strongSelf refreshAllListersShowing:src.currentPath];
 
-    if (failed.count > 0) {
-        [self showAlert:isMove ? @"Some items could not be moved" : @"Some items could not be copied"
-                   info:[failed componentsJoinedByString:@"\n"]
-                  style:NSAlertStyleWarning];
-    }
+        if (failed.count > 0) {
+            [strongSelf showAlert:isMove ? @"Some items could not be moved"
+                                         : @"Some items could not be copied"
+                             info:[failed componentsJoinedByString:@"\n"]
+                            style:NSAlertStyleWarning];
+        }
+        keepAlive = nil;
+    }];
 }
 
 @end
