@@ -178,7 +178,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
 
 @class ListerDataSource;
 
-@interface ListerWindowController : NSWindowController <NSWindowDelegate, QLPreviewPanelDataSource, QLPreviewPanelDelegate>
+@interface ListerWindowController : NSWindowController <NSWindowDelegate, QLPreviewPanelDataSource, QLPreviewPanelDelegate, NSMenuDelegate>
 @property (nonatomic, strong) ListerDataSource *dataSource;
 @property (nonatomic, strong) NSTableView *tableView;
 @property (nonatomic, strong) NSTextField *pathField;
@@ -520,7 +520,10 @@ typedef NS_ENUM(NSInteger, ListerState) {
 
     /* Right-click context menu — items route to appDelegate actions */
     NSMenu *menu = [[NSMenu alloc] init];
+    menu.delegate = self;    /* rebuild Open With dynamically per clicked row */
     [menu addItemWithTitle:@"Open"           action:@selector(openSelectionAction:) keyEquivalent:@""].target = self;
+    NSMenuItem *openWith = [menu addItemWithTitle:@"Open With" action:NULL keyEquivalent:@""];
+    openWith.submenu = [[NSMenu alloc] initWithTitle:@"Open With"];
     [menu addItemWithTitle:@"Reveal in Finder" action:@selector(revealInFinderAction:) keyEquivalent:@""].target = self;
     [menu addItem:[NSMenuItem separatorItem]];
     [menu addItemWithTitle:@"Info"           action:@selector(infoAction:)    keyEquivalent:@""].target = _appDelegate;
@@ -754,6 +757,88 @@ typedef NS_ENUM(NSInteger, ListerState) {
     } else {
         [[NSWorkspace sharedWorkspace] openURL:url];
     }
+}
+
+/* Rebuild Open With submenu based on the right-clicked (or selected) row */
+- (void)menuNeedsUpdate:(NSMenu *)menu {
+    if (menu != _tableView.menu) return;
+    NSMenuItem *openWithItem = nil;
+    for (NSMenuItem *it in menu.itemArray) {
+        if ([it.title isEqualToString:@"Open With"]) { openWithItem = it; break; }
+    }
+    if (!openWithItem) return;
+
+    NSString *path = [self pathForContextClick];
+    NSMenu *sub = openWithItem.submenu;
+    [sub removeAllItems];
+
+    if (!path) {
+        openWithItem.enabled = NO;
+        return;
+    }
+    openWithItem.enabled = YES;
+
+    NSURL *url = [NSURL fileURLWithPath:path];
+    NSArray<NSURL *> *apps = [[NSWorkspace sharedWorkspace] URLsForApplicationsToOpenURL:url];
+    NSURL *defaultApp = [[NSWorkspace sharedWorkspace] URLForApplicationToOpenURL:url];
+    for (NSURL *app in apps) {
+        NSString *name = [[NSFileManager defaultManager] displayNameAtPath:app.path];
+        NSString *title = [app isEqual:defaultApp]
+            ? [NSString stringWithFormat:@"%@ (default)", name] : name;
+        NSMenuItem *it = [sub addItemWithTitle:title
+                                        action:@selector(openWithAction:)
+                                 keyEquivalent:@""];
+        it.target = self;
+        it.representedObject = @{ @"file": path, @"app": app };
+        NSImage *icon = [[NSWorkspace sharedWorkspace] iconForFile:app.path];
+        icon.size = NSMakeSize(16, 16);
+        it.image = icon;
+    }
+    if (apps.count > 0) [sub addItem:[NSMenuItem separatorItem]];
+    NSMenuItem *other = [sub addItemWithTitle:@"Other…"
+                                       action:@selector(openWithOtherAction:)
+                                keyEquivalent:@""];
+    other.target = self;
+    other.representedObject = path;
+}
+
+- (NSString *)pathForContextClick {
+    NSInteger row = _tableView.clickedRow >= 0 ? _tableView.clickedRow : _tableView.selectedRow;
+    if (row < 0) return nil;
+    dir_entry_t *e = dir_buffer_get_entry(_dataSource.buffer, (int)row);
+    if (!e || !e->name) return nil;
+    char full[4096];
+    pal_path_join([_currentPath fileSystemRepresentation], e->name, full, sizeof(full));
+    return [NSString stringWithUTF8String:full];
+}
+
+- (void)openWithAction:(NSMenuItem *)sender {
+    NSDictionary *d = sender.representedObject;
+    NSURL *fileURL = [NSURL fileURLWithPath:d[@"file"]];
+    NSURL *appURL = d[@"app"];
+    NSWorkspaceOpenConfiguration *cfg = [NSWorkspaceOpenConfiguration configuration];
+    [[NSWorkspace sharedWorkspace] openURLs:@[fileURL]
+                       withApplicationAtURL:appURL
+                              configuration:cfg
+                          completionHandler:nil];
+}
+
+- (void)openWithOtherAction:(NSMenuItem *)sender {
+    NSString *filePath = sender.representedObject;
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.directoryURL = [NSURL fileURLWithPath:@"/Applications"];
+    panel.allowedContentTypes = @[];
+    panel.allowsMultipleSelection = NO;
+    panel.canChooseDirectories = NO;
+    panel.canChooseFiles = YES;
+    panel.message = [NSString stringWithFormat:@"Choose an application to open %@", filePath.lastPathComponent];
+    if ([panel runModal] != NSModalResponseOK || !panel.URL) return;
+
+    NSWorkspaceOpenConfiguration *cfg = [NSWorkspaceOpenConfiguration configuration];
+    [[NSWorkspace sharedWorkspace] openURLs:@[[NSURL fileURLWithPath:filePath]]
+                       withApplicationAtURL:panel.URL
+                              configuration:cfg
+                          completionHandler:nil];
 }
 
 - (void)revealInFinderAction:(id)sender {
@@ -1450,6 +1535,27 @@ typedef NS_ENUM(NSInteger, ListerState) {
                                              action:@selector(navigateToBookmark:)
                                       keyEquivalent:@""];
             it.representedObject = bm[@"path"];
+            it.target = self;
+        }
+    }
+
+    /* Mounted volumes (DOpus "Devices") */
+    pal_volume_t vols[64];
+    int nvol = pal_volumes_list(vols, 64);
+    if (nvol > 0) {
+        [menu addItem:[NSMenuItem separatorItem]];
+        NSMenuItem *header = [[NSMenuItem alloc] initWithTitle:@"Devices" action:NULL keyEquivalent:@""];
+        header.enabled = NO;
+        [menu addItem:header];
+        for (int i = 0; i < nvol; i++) {
+            NSString *name = [NSString stringWithUTF8String:vols[i].name];
+            NSString *mount = [NSString stringWithUTF8String:vols[i].mount_point];
+            char szBuf[32]; pal_format_size(vols[i].total_bytes, szBuf, sizeof(szBuf));
+            NSString *title = [NSString stringWithFormat:@"  %@ (%s)", name, szBuf];
+            NSMenuItem *it = [menu addItemWithTitle:title
+                                             action:@selector(navigateToBookmark:)
+                                      keyEquivalent:@""];
+            it.representedObject = mount;
             it.target = self;
         }
     }
