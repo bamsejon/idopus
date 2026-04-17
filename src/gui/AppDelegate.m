@@ -69,6 +69,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
 - (void)sortByAction:(NSMenuItem *)sender;
 - (void)toggleReverseSortAction:(id)sender;
 - (void)toggleFilesMixedAction:(id)sender;
+- (void)toggleColumnVisibility:(NSMenuItem *)sender;
 - (void)navigateToBookmark:(NSMenuItem *)sender;
 - (void)addCurrentBookmark:(id)sender;
 - (void)removeBookmark:(id)sender;
@@ -639,12 +640,15 @@ typedef NS_ENUM(NSInteger, ListerState) {
         { @"date", @"Date",   140, 100 },
         { @"type", @"Type",    60,  40 },
     };
+    NSSet<NSString *> *hiddenCols = [NSSet setWithArray:
+        ([[NSUserDefaults standardUserDefaults] arrayForKey:@"hiddenColumns"] ?: @[])];
     for (int i = 0; i < 4; i++) {
         NSTableColumn *col = [[NSTableColumn alloc] initWithIdentifier:cols[i].ident];
         col.title = cols[i].title;
         col.width = cols[i].width;
         col.minWidth = cols[i].min;
         col.sortDescriptorPrototype = [NSSortDescriptor sortDescriptorWithKey:cols[i].ident ascending:YES];
+        col.hidden = [hiddenCols containsObject:cols[i].ident];
         [_tableView addTableColumn:col];
     }
 
@@ -1955,6 +1959,25 @@ typedef NS_ENUM(NSInteger, ListerState) {
     [sortSub addItemWithTitle:@"Files Mixed"  action:@selector(toggleFilesMixedAction:) keyEquivalent:@""];
     sortItem.submenu = sortSub;
 
+    /* Show Columns submenu (hide/show columns) — applies to all Listers */
+    NSMenuItem *colsItem = [viewMenu addItemWithTitle:@"Show Columns" action:NULL keyEquivalent:@""];
+    NSMenu *colsSub = [[NSMenu alloc] initWithTitle:@"Show Columns"];
+    colsSub.autoenablesItems = NO;
+    NSArray<NSString *> *colIds = @[@"name", @"size", @"date", @"type"];
+    NSArray<NSString *> *colTitles = @[@"Name", @"Size", @"Date", @"Type"];
+    NSSet<NSString *> *hidden = [NSSet setWithArray:
+        ([[NSUserDefaults standardUserDefaults] arrayForKey:@"hiddenColumns"] ?: @[])];
+    for (NSUInteger i = 0; i < colIds.count; i++) {
+        NSMenuItem *mi = [colsSub addItemWithTitle:colTitles[i]
+                                            action:@selector(toggleColumnVisibility:)
+                                     keyEquivalent:@""];
+        mi.representedObject = colIds[i];
+        mi.state = [hidden containsObject:colIds[i]] ? NSControlStateValueOff : NSControlStateValueOn;
+        /* Name column should not be hide-able */
+        if ([colIds[i] isEqualToString:@"name"]) mi.enabled = NO;
+    }
+    colsItem.submenu = colsSub;
+
     [viewMenu addItem:[NSMenuItem separatorItem]];
     NSMenuItem *qlItem = [viewMenu addItemWithTitle:@"Quick Look"
                                              action:@selector(toggleQuickLook:)
@@ -2610,6 +2633,26 @@ typedef NS_ENUM(NSInteger, ListerState) {
     bool currentRev = (b->format.sort.flags & SORTF_REVERSE) != 0;
     dir_buffer_set_sort(b, b->format.sort.field, !currentRev, b->format.sort.separation);
     [src.tableView reloadData];
+}
+
+- (void)toggleColumnVisibility:(NSMenuItem *)sender {
+    NSString *colId = sender.representedObject;
+    if (!colId) return;
+
+    NSMutableSet<NSString *> *hidden = [NSMutableSet setWithArray:
+        ([[NSUserDefaults standardUserDefaults] arrayForKey:@"hiddenColumns"] ?: @[])];
+    BOOL wasHidden = [hidden containsObject:colId];
+    if (wasHidden) [hidden removeObject:colId]; else [hidden addObject:colId];
+    sender.state = wasHidden ? NSControlStateValueOn : NSControlStateValueOff;
+
+    [[NSUserDefaults standardUserDefaults] setObject:hidden.allObjects forKey:@"hiddenColumns"];
+
+    /* Apply to every live Lister */
+    for (ListerWindowController *lw in _listerControllers) {
+        for (NSTableColumn *c in lw.tableView.tableColumns) {
+            if ([c.identifier isEqualToString:colId]) c.hidden = !wasHidden;
+        }
+    }
 }
 
 - (void)toggleFilesMixedAction:(id)sender {
