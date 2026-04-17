@@ -551,7 +551,8 @@ typedef NS_ENUM(NSInteger, ListerState) {
  * Buttons route to IDOpusAppDelegate methods that operate on activeSource. */
 @interface ButtonBankPanelController : NSWindowController
 - (instancetype)initWithAppDelegate:(IDOpusAppDelegate *)appDelegate;
-- (void)positionBetweenListers;
+- (void)positionBetweenLeftFrame:(NSRect)leftFrame rightFrame:(NSRect)rightFrame;
++ (CGFloat)desiredWidth;
 @end
 
 @implementation ButtonBankPanelController {
@@ -559,11 +560,10 @@ typedef NS_ENUM(NSInteger, ListerState) {
 }
 
 - (instancetype)initWithAppDelegate:(IDOpusAppDelegate *)appDelegate {
-    NSRect frame = NSMakeRect(0, 0, 420, 76);
+    NSRect frame = NSMakeRect(0, 0, 108, 400);
     NSWindowStyleMask style = NSWindowStyleMaskTitled |
                                NSWindowStyleMaskClosable |
-                               NSWindowStyleMaskUtilityWindow |
-                               NSWindowStyleMaskHUDWindow |
+                               NSWindowStyleMaskResizable |
                                NSWindowStyleMaskNonactivatingPanel;
     NSPanel *panel = [[NSPanel alloc] initWithContentRect:frame
                                                 styleMask:style
@@ -574,6 +574,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
     panel.hidesOnDeactivate = NO;
     panel.level = NSFloatingWindowLevel;
     panel.becomesKeyOnlyIfNeeded = YES;
+    panel.contentMinSize = NSMakeSize(70, 200);
 
     self = [super initWithWindow:panel];
     if (!self) return nil;
@@ -586,68 +587,67 @@ typedef NS_ENUM(NSInteger, ListerState) {
 - (void)buildGrid {
     NSView *content = self.window.contentView;
 
-    /* Two rows × five buttons each — DOpus Magellan defaults trimmed to what we support */
-    struct { NSString *title; SEL action; } row1[] = {
-        { @"Copy",    @selector(copyAction:) },
-        { @"Move",    @selector(moveAction:) },
-        { @"Delete",  @selector(deleteAction:) },
-        { @"Rename",  @selector(renameAction:) },
+    /* Vertical stack of single-button rows — DOpus Magellan default layout
+     * when the Button Bank sits between two side-by-side Listers. */
+    struct { NSString *title; SEL action; } buttons[] = {
+        { @"Copy",    @selector(copyAction:)    },
+        { @"Move",    @selector(moveAction:)    },
+        { @"Delete",  @selector(deleteAction:)  },
+        { @"Rename",  @selector(renameAction:)  },
         { @"MakeDir", @selector(makeDirAction:) },
-    };
-    struct { NSString *title; SEL action; } row2[] = {
-        { @"Parent",  @selector(parentAction:) },
-        { @"Root",    @selector(rootAction:) },
+        { @"Parent",  @selector(parentAction:)  },
+        { @"Root",    @selector(rootAction:)    },
         { @"Refresh", @selector(refreshAction:) },
-        { @"All",     @selector(allAction:) },
-        { @"None",    @selector(noneAction:) },
+        { @"All",     @selector(allAction:)     },
+        { @"None",    @selector(noneAction:)    },
     };
-
-    NSStackView *r1 = [self makeRow:row1 count:5];
-    NSStackView *r2 = [self makeRow:row2 count:5];
+    NSInteger n = sizeof(buttons)/sizeof(buttons[0]);
 
     NSStackView *column = [[NSStackView alloc] init];
     column.orientation = NSUserInterfaceLayoutOrientationVertical;
     column.spacing = 4;
     column.distribution = NSStackViewDistributionFillEqually;
+    column.alignment = NSLayoutAttributeCenterX;
     column.translatesAutoresizingMaskIntoConstraints = NO;
-    [column addArrangedSubview:r1];
-    [column addArrangedSubview:r2];
-    [content addSubview:column];
 
+    for (NSInteger i = 0; i < n; i++) {
+        NSButton *b = [NSButton buttonWithTitle:buttons[i].title
+                                         target:_appDelegate
+                                         action:buttons[i].action];
+        b.bezelStyle = NSBezelStyleRounded;
+        b.controlSize = NSControlSizeSmall;
+        b.font = [NSFont systemFontOfSize:11];
+        b.translatesAutoresizingMaskIntoConstraints = NO;
+        [column addArrangedSubview:b];
+        [b.leadingAnchor constraintEqualToAnchor:column.leadingAnchor].active = YES;
+        [b.trailingAnchor constraintEqualToAnchor:column.trailingAnchor].active = YES;
+    }
+
+    [content addSubview:column];
     [NSLayoutConstraint activateConstraints:@[
-        [column.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:8],
-        [column.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-8],
+        [column.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:6],
+        [column.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-6],
         [column.topAnchor constraintEqualToAnchor:content.topAnchor constant:6],
         [column.bottomAnchor constraintEqualToAnchor:content.bottomAnchor constant:-6],
     ]];
 }
 
-- (NSStackView *)makeRow:(void *)specsPtr count:(int)n {
-    struct Spec { NSString *title; SEL action; };
-    struct Spec *specs = (struct Spec *)specsPtr;
+/* Desired panel width when docked between two Listers */
++ (CGFloat)desiredWidth { return 108; }
 
-    NSStackView *row = [[NSStackView alloc] init];
-    row.orientation = NSUserInterfaceLayoutOrientationHorizontal;
-    row.spacing = 4;
-    row.distribution = NSStackViewDistributionFillEqually;
-    for (int i = 0; i < n; i++) {
-        NSButton *b = [NSButton buttonWithTitle:specs[i].title
-                                         target:_appDelegate
-                                         action:specs[i].action];
-        b.bezelStyle = NSBezelStyleRounded;
-        b.controlSize = NSControlSizeSmall;
-        b.font = [NSFont systemFontOfSize:11];
-        [row addArrangedSubview:b];
-    }
-    return row;
-}
+- (void)positionBetweenLeftFrame:(NSRect)leftFrame rightFrame:(NSRect)rightFrame {
+    /* Place the panel centered vertically in the gap between the two Listers.
+     * Horizontal position = gap between listers. Height uses the panel's
+     * natural intrinsic size (buttons at default height). */
+    CGFloat x = NSMaxX(leftFrame);
+    CGFloat gapW = rightFrame.origin.x - x;
+    CGFloat listersCenterY = leftFrame.origin.y + leftFrame.size.height / 2;
 
-- (void)positionBetweenListers {
-    /* Center the panel near the top of the screen, above the Listers. */
-    NSRect screen = [[NSScreen mainScreen] visibleFrame];
-    NSRect frame = self.window.frame;
-    frame.origin.x = screen.origin.x + (screen.size.width - frame.size.width) / 2;
-    frame.origin.y = screen.origin.y + screen.size.height - frame.size.height - 12;
+    NSRect cur = self.window.frame;
+    NSRect frame = NSMakeRect(x + (gapW - cur.size.width) / 2,
+                              listersCenterY - cur.size.height / 2,
+                              cur.size.width,
+                              cur.size.height);
     [self.window setFrame:frame display:YES animate:NO];
 }
 
@@ -663,28 +663,30 @@ typedef NS_ENUM(NSInteger, ListerState) {
 
     [self createMainMenu];
 
-    /* Default layout: two tiled Listers side-by-side, matching classic DOpus
-     * dual-pane presentation. Right Lister becomes SOURCE (opened last),
-     * left becomes DEST. */
+    /* Default layout: Button Bank in the middle, two Listers flanking it.
+     * Matches classic DOpus Magellan "buttons between listers" arrangement. */
     NSRect screen = [[NSScreen mainScreen] visibleFrame];
-    CGFloat w = MIN(1400, screen.size.width - 100);
-    CGFloat h = MIN(800,  screen.size.height - 100);
-    CGFloat x = screen.origin.x + (screen.size.width  - w) / 2;
+    CGFloat totalW = MIN(1400, screen.size.width - 100);
+    CGFloat h = MIN(800, screen.size.height - 100);
+    CGFloat bankW = [ButtonBankPanelController desiredWidth];
+    CGFloat listerW = floor((totalW - bankW) / 2);
+    CGFloat x = screen.origin.x + (screen.size.width  - totalW) / 2;
     CGFloat y = screen.origin.y + (screen.size.height - h) / 2;
-    CGFloat halfW = floor(w / 2);
 
-    NSRect leftFrame  = NSMakeRect(x,         y, halfW,     h);
-    NSRect rightFrame = NSMakeRect(x + halfW, y, w - halfW, h);
+    NSRect leftFrame  = NSMakeRect(x,                       y, listerW, h);
+    NSRect bankFrame  = NSMakeRect(x + listerW,             y, bankW,   h);
+    NSRect rightFrame = NSMakeRect(x + listerW + bankW,     y, listerW, h);
 
     ListerWindowController *left  = [self newListerWindow:NSHomeDirectory() frame:leftFrame];
     ListerWindowController *right = [self newListerWindow:NSHomeDirectory() frame:rightFrame];
     [left.window setFrame:leftFrame display:YES animate:NO];
     [right.window setFrame:rightFrame display:YES animate:NO];
 
-    /* Floating Button Bank panel — classic Magellan feature */
+    /* Button Bank panel docked between the two Listers */
     _buttonBankPanel = [[ButtonBankPanelController alloc] initWithAppDelegate:self];
-    [_buttonBankPanel positionBetweenListers];
+    (void)bankFrame;
     [_buttonBankPanel.window orderFront:nil];
+    [_buttonBankPanel positionBetweenLeftFrame:leftFrame rightFrame:rightFrame];
 
     /* Keep the SOURCE Lister key after bringing up the panel */
     [right.window makeKeyAndOrderFront:nil];
