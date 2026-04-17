@@ -210,7 +210,8 @@ typedef NS_ENUM(NSInteger, ListerState) {
 @interface ListerWindowController : NSWindowController <NSWindowDelegate, QLPreviewPanelDataSource, QLPreviewPanelDelegate, NSMenuDelegate, NSSearchFieldDelegate>
 @property (nonatomic, strong) ListerDataSource *dataSource;
 @property (nonatomic, strong) NSTableView *tableView;
-@property (nonatomic, strong) NSTextField *pathField;
+@property (nonatomic, strong) NSTextField *pathField;        /* edit mode */
+@property (nonatomic, strong) NSPathControl *pathControl;    /* breadcrumb mode */
 @property (nonatomic, strong) NSTextField *stateLabel;  /* SOURCE/DEST/OFF */
 @property (nonatomic, strong) NSTextField *statusBar;   /* file/dir counts */
 @property (nonatomic, strong) NSStackView *buttonBank;
@@ -639,13 +640,25 @@ typedef NS_ENUM(NSInteger, ListerState) {
     NSView *content = self.window.contentView;
     content.wantsLayer = YES;
 
-    /* Path field (top) */
+    /* Path field (edit mode — hidden by default, shown on double-click in control) */
     _pathField = [NSTextField textFieldWithString:_currentPath];
     _pathField.font = [NSFont monospacedSystemFontOfSize:12 weight:NSFontWeightRegular];
     _pathField.translatesAutoresizingMaskIntoConstraints = NO;
     _pathField.target = self;
     _pathField.action = @selector(pathFieldAction:);
+    _pathField.hidden = YES;
     [content addSubview:_pathField];
+
+    /* Path control (breadcrumbs — default) */
+    _pathControl = [[NSPathControl alloc] init];
+    _pathControl.URL = [NSURL fileURLWithPath:_currentPath];
+    _pathControl.pathStyle = NSPathStyleStandard;
+    _pathControl.backgroundColor = [NSColor controlBackgroundColor];
+    _pathControl.target = self;
+    _pathControl.action = @selector(pathControlAction:);
+    _pathControl.doubleAction = @selector(pathControlDoubleClick:);
+    _pathControl.translatesAutoresizingMaskIntoConstraints = NO;
+    [content addSubview:_pathControl];
 
     /* Back / Forward (history) */
     _backButton = [NSButton buttonWithTitle:@"\u25C0" target:self action:@selector(goBack:)];
@@ -837,9 +850,13 @@ typedef NS_ENUM(NSInteger, ListerState) {
         [refreshBtn.topAnchor constraintEqualToAnchor:content.topAnchor constant:8],
         [refreshBtn.widthAnchor constraintEqualToConstant:32],
 
-        [_pathField.leadingAnchor constraintEqualToAnchor:refreshBtn.trailingAnchor constant:8],
-        [_pathField.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-8],
-        [_pathField.centerYAnchor constraintEqualToAnchor:backBtn.centerYAnchor],
+        [_pathControl.leadingAnchor constraintEqualToAnchor:refreshBtn.trailingAnchor constant:8],
+        [_pathControl.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-8],
+        [_pathControl.centerYAnchor constraintEqualToAnchor:backBtn.centerYAnchor],
+
+        [_pathField.leadingAnchor constraintEqualToAnchor:_pathControl.leadingAnchor],
+        [_pathField.trailingAnchor constraintEqualToAnchor:_pathControl.trailingAnchor],
+        [_pathField.centerYAnchor constraintEqualToAnchor:_pathControl.centerYAnchor],
 
         [_buttonBank.topAnchor constraintEqualToAnchor:backBtn.bottomAnchor constant:6],
         [_buttonBank.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:8],
@@ -876,6 +893,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
 - (void)loadPath:(NSString *)path {
     _currentPath = path;
     _pathField.stringValue = path;
+    _pathControl.URL = [NSURL fileURLWithPath:path];
     self.window.title = [NSString stringWithFormat:@"iDOpus — %@", path.lastPathComponent];
     [_dataSource loadPath:path];
     [self updateStatusBar];
@@ -1527,8 +1545,34 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     }
 }
 
+- (void)pathControlAction:(NSPathControl *)sender {
+    NSPathControlItem *clicked = sender.clickedPathItem;
+    if (clicked.URL) [self loadPath:clicked.URL.path];
+}
+
+/* Double-click anywhere on the path control (not a specific segment) → switch
+ * to text-edit mode so the user can type an arbitrary path. */
+- (void)pathControlDoubleClick:(NSPathControl *)sender {
+    if (sender.clickedPathItem) return;   /* segment click, not bg */
+    [self enterPathEditMode];
+}
+
+- (void)enterPathEditMode {
+    _pathField.stringValue = _currentPath;
+    _pathField.hidden = NO;
+    _pathControl.hidden = YES;
+    [self.window makeFirstResponder:_pathField];
+    [_pathField selectText:nil];
+}
+
+- (void)exitPathEditMode {
+    _pathField.hidden = YES;
+    _pathControl.hidden = NO;
+}
+
 - (void)pathFieldAction:(NSTextField *)sender {
-    NSString *path = sender.stringValue;
+    NSString *path = [sender.stringValue stringByExpandingTildeInPath];
+    [self exitPathEditMode];
     if ([[NSFileManager defaultManager] fileExistsAtPath:path])
         [self loadPath:path];
 }
