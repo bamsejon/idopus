@@ -178,6 +178,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
 @property (nonatomic, strong) NSTextField *pathField;
 @property (nonatomic, strong) NSTextField *stateLabel;  /* SOURCE/DEST/OFF */
 @property (nonatomic, strong) NSTextField *statusBar;   /* file/dir counts */
+@property (nonatomic, strong) NSStackView *buttonBank;
 @property (nonatomic, copy) NSString *currentPath;
 @property (nonatomic, assign) ListerState state;
 @property (nonatomic, weak) IDOpusAppDelegate *appDelegate;
@@ -278,6 +279,50 @@ typedef NS_ENUM(NSInteger, ListerState) {
     scrollView.documentView = _tableView;
     [content addSubview:scrollView];
 
+    /* Button bank (DOpus-style row of text buttons between path field and file list) */
+    NSStackView *bank = [[NSStackView alloc] init];
+    bank.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    bank.spacing = 4;
+    bank.translatesAutoresizingMaskIntoConstraints = NO;
+    bank.distribution = NSStackViewDistributionFill;
+
+    struct { NSString *title; SEL action; id target; } btns[] = {
+        { @"Copy",    @selector(copyAction:),    _appDelegate },
+        { @"Move",    @selector(moveAction:),    _appDelegate },
+        { @"Delete",  @selector(deleteAction:),  _appDelegate },
+        { @"Rename",  @selector(renameAction:),  _appDelegate },
+        { @"MakeDir", @selector(makeDirAction:), _appDelegate },
+        { @"",        NULL, nil },  /* separator */
+        { @"Parent",  @selector(goUp:),          self },
+        { @"Root",    @selector(goRoot:),        self },
+        { @"",        NULL, nil },
+        { @"All",     @selector(selectAllFiles:),   self },
+        { @"None",    @selector(deselectAllFiles:), self },
+    };
+    for (size_t i = 0; i < sizeof(btns)/sizeof(btns[0]); i++) {
+        if (btns[i].title.length == 0) {
+            /* Visual separator: fixed-width spacer view */
+            NSView *sep = [[NSView alloc] init];
+            sep.translatesAutoresizingMaskIntoConstraints = NO;
+            [sep.widthAnchor constraintEqualToConstant:8].active = YES;
+            [bank addArrangedSubview:sep];
+            continue;
+        }
+        NSButton *b = [NSButton buttonWithTitle:btns[i].title target:btns[i].target action:btns[i].action];
+        b.bezelStyle = NSBezelStyleRounded;
+        b.controlSize = NSControlSizeSmall;
+        b.font = [NSFont systemFontOfSize:11];
+        [bank addArrangedSubview:b];
+    }
+    /* Flexible trailing spacer so buttons stay left-aligned */
+    NSView *flex = [[NSView alloc] init];
+    flex.translatesAutoresizingMaskIntoConstraints = NO;
+    [flex setContentHuggingPriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [bank addArrangedSubview:flex];
+
+    [content addSubview:bank];
+    _buttonBank = bank;
+
     /* State label (bottom-left: SOURCE/DEST/OFF — mirrors original status area) */
     _stateLabel = [NSTextField labelWithString:@"OFF"];
     _stateLabel.font = [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightBold];
@@ -307,7 +352,11 @@ typedef NS_ENUM(NSInteger, ListerState) {
         [_pathField.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-8],
         [_pathField.centerYAnchor constraintEqualToAnchor:backBtn.centerYAnchor],
 
-        [scrollView.topAnchor constraintEqualToAnchor:backBtn.bottomAnchor constant:8],
+        [_buttonBank.topAnchor constraintEqualToAnchor:backBtn.bottomAnchor constant:6],
+        [_buttonBank.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:8],
+        [_buttonBank.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-8],
+
+        [scrollView.topAnchor constraintEqualToAnchor:_buttonBank.bottomAnchor constant:6],
         [scrollView.leadingAnchor constraintEqualToAnchor:content.leadingAnchor],
         [scrollView.trailingAnchor constraintEqualToAnchor:content.trailingAnchor],
         [scrollView.bottomAnchor constraintEqualToAnchor:_statusBar.topAnchor constant:-4],
@@ -360,6 +409,26 @@ typedef NS_ENUM(NSInteger, ListerState) {
 
 - (void)refresh:(id)sender {
     [self loadPath:_currentPath];
+}
+
+- (void)goRoot:(id)sender {
+    /* Volume root — walk parents until parent == self (fs root) */
+    NSString *p = _currentPath;
+    while (YES) {
+        NSString *parent = [p stringByDeletingLastPathComponent];
+        if ([parent isEqualToString:p] || parent.length == 0) break;
+        p = parent;
+    }
+    [self loadPath:p];
+}
+
+- (void)selectAllFiles:(id)sender {
+    [_tableView selectRowIndexes:[NSIndexSet indexSetWithIndexesInRange:NSMakeRange(0, _tableView.numberOfRows)]
+            byExtendingSelection:NO];
+}
+
+- (void)deselectAllFiles:(id)sender {
+    [_tableView deselectAll:nil];
 }
 
 - (void)pathFieldAction:(NSTextField *)sender {
