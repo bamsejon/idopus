@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(idopus VERSION 0.14.1 LANGUAGES C)
+project(idopus VERSION 0.15.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -45,6 +45,7 @@ if(APPLE)
     target_link_libraries(idopus PRIVATE core pal
         "-framework Cocoa"
         "-framework Quartz"
+        "-framework QuickLookThumbnailing"
         pthread
     )
     set_target_properties(idopus PROPERTIES

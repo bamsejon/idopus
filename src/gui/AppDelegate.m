@@ -6,6 +6,7 @@
 
 #import <Cocoa/Cocoa.h>
 #import <Quartz/Quartz.h>
+#import <QuickLookThumbnailing/QuickLookThumbnailing.h>
 #import <objc/runtime.h>
 #include <sys/stat.h>
 #include <pwd.h>
@@ -227,6 +228,8 @@ typedef NS_ENUM(NSInteger, ListerState) {
 @property (nonatomic, assign) BOOL hideDotfiles;     /* default YES */
 @property (nonatomic, weak) ListerWindowController *owner;  /* for drag-drop access */
 @property (nonatomic, strong) NSMutableDictionary<NSString *, NSImage *> *iconCache;
+@property (nonatomic, strong) NSCache<NSString *, NSImage *> *thumbnailCache;
+@property (nonatomic, strong) NSMutableSet<NSString *> *pendingThumbnails;
 - (void)loadPath:(NSString *)path;
 - (void)sortByColumn:(NSString *)identifier;
 - (void)applyCurrentFilter;
@@ -241,33 +244,107 @@ typedef NS_ENUM(NSInteger, ListerState) {
         _buffer = dir_buffer_create();
         _hideDotfiles = YES;    /* DOpus default: dotfiles filtered out */
         _iconCache = [NSMutableDictionary dictionary];
+        _thumbnailCache = [[NSCache alloc] init];
+        _thumbnailCache.countLimit = 512;
+        _pendingThumbnails = [NSMutableSet set];
     }
     return self;
 }
 
 - (NSImage *)iconForEntry:(dir_entry_t *)entry {
     if (!entry || !_owner) return nil;
-    /* Cache key: extension (files) or "__dir__" (folders) — avoids one stat
-     * per cell refresh. First appearance of an extension still does one lookup. */
-    NSString *key;
-    if (dir_entry_is_dir(entry)) {
-        key = @"__dir__";
-    } else {
-        const char *ext = pal_path_extension(entry->name);
-        key = ext && *ext ? [@"." stringByAppendingString:[NSString stringWithUTF8String:ext]].lowercaseString
-                          : @"__file__";
-    }
-    NSImage *cached = _iconCache[key];
-    if (cached) return cached;
 
+    /* Directories: single shared icon, cache by extension key */
+    if (dir_entry_is_dir(entry)) {
+        NSImage *c = _iconCache[@"__dir__"];
+        if (c) return c;
+        char full[4096];
+        pal_path_join([_owner.currentPath fileSystemRepresentation],
+                      entry->name, full, sizeof(full));
+        NSImage *img = [[NSWorkspace sharedWorkspace] iconForFile:
+                        [NSString stringWithUTF8String:full]];
+        img.size = NSMakeSize(16, 16);
+        if (img) _iconCache[@"__dir__"] = img;
+        return img;
+    }
+
+    /* Files: build the full path once */
     char full[4096];
     pal_path_join([_owner.currentPath fileSystemRepresentation],
                   entry->name, full, sizeof(full));
-    NSImage *img = [[NSWorkspace sharedWorkspace] iconForFile:
-                    [NSString stringWithUTF8String:full]];
+    NSString *fullPath = [NSString stringWithUTF8String:full];
+
+    /* Check thumbnail cache (per-file, high-resolution previews) */
+    NSImage *thumb = [_thumbnailCache objectForKey:fullPath];
+    if (thumb) return thumb;
+
+    /* Kick off an async thumbnail request if we haven't already */
+    if (![_pendingThumbnails containsObject:fullPath]) {
+        [_pendingThumbnails addObject:fullPath];
+        [self requestThumbnailForPath:fullPath];
+    }
+
+    /* Fallback: generic extension icon while the thumbnail renders */
+    const char *ext = pal_path_extension(entry->name);
+    NSString *extKey = ext && *ext
+        ? [@"." stringByAppendingString:[NSString stringWithUTF8String:ext]].lowercaseString
+        : @"__file__";
+    NSImage *cached = _iconCache[extKey];
+    if (cached) return cached;
+    NSImage *img = [[NSWorkspace sharedWorkspace] iconForFile:fullPath];
     img.size = NSMakeSize(16, 16);
-    if (img) _iconCache[key] = img;
+    if (img) _iconCache[extKey] = img;
     return img;
+}
+
+- (void)requestThumbnailForPath:(NSString *)fullPath {
+    CGFloat scale = [NSScreen mainScreen].backingScaleFactor ?: 2.0;
+    QLThumbnailGenerationRequest *req = [[QLThumbnailGenerationRequest alloc]
+        initWithFileAtURL:[NSURL fileURLWithPath:fullPath]
+                     size:CGSizeMake(18, 18)
+                    scale:scale
+      representationTypes:QLThumbnailGenerationRequestRepresentationTypeThumbnail];
+
+    __weak typeof(self) weakSelf = self;
+    [[QLThumbnailGenerator sharedGenerator] generateBestRepresentationForRequest:req
+                                                              completionHandler:
+      ^(QLThumbnailRepresentation *rep, NSError *err) {
+        if (!rep || err) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [weakSelf.pendingThumbnails removeObject:fullPath];
+            });
+            return;
+        }
+        NSImage *img = rep.NSImage;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            typeof(self) s = weakSelf;
+            if (!s) return;
+            [s.pendingThumbnails removeObject:fullPath];
+            if (!img) return;
+            [s.thumbnailCache setObject:img forKey:fullPath];
+            /* Find and redraw the row for this path */
+            [s reloadRowForPath:fullPath];
+        });
+    }];
+}
+
+- (void)reloadRowForPath:(NSString *)fullPath {
+    if (!_buffer || !_owner) return;
+    NSString *dir = _owner.currentPath;
+    if (!dir) return;
+    /* Derive the filename this thumbnail belongs to */
+    if (![fullPath hasPrefix:dir]) return;
+    NSString *name = fullPath.lastPathComponent;
+    int total = _buffer->stats.total_entries;
+    for (int i = 0; i < total; i++) {
+        dir_entry_t *e = dir_buffer_get_entry(_buffer, i);
+        if (!e || !e->name) continue;
+        if (strcmp(e->name, [name UTF8String]) == 0) {
+            [_tableView reloadDataForRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)i]
+                                  columnIndexes:[NSIndexSet indexSetWithIndex:0]];
+            return;
+        }
+    }
 }
 
 - (void)dealloc {
@@ -370,12 +447,12 @@ typedef NS_ENUM(NSInteger, ListerState) {
 
         CGFloat textLeft = 0;
         if (isNameColumn) {
-            NSImageView *iv = [[NSImageView alloc] initWithFrame:NSMakeRect(2, 2, 16, 16)];
+            NSImageView *iv = [[NSImageView alloc] initWithFrame:NSMakeRect(2, 2, 18, 18)];
             iv.imageScaling = NSImageScaleProportionallyUpOrDown;
             iv.autoresizingMask = NSViewMaxXMargin;
             cell.imageView = iv;
             [cell addSubview:iv];
-            textLeft = 22;
+            textLeft = 24;
         }
 
         NSTextField *tf = [[NSTextField alloc] initWithFrame:NSMakeRect(textLeft, 0, cell.bounds.size.width - textLeft, 20)];
@@ -405,7 +482,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
 }
 
 - (CGFloat)tableView:(NSTableView *)tableView heightOfRow:(NSInteger)row {
-    return 20.0;
+    return 22.0;
 }
 
 - (void)tableView:(NSTableView *)tableView didClickTableColumn:(NSTableColumn *)tableColumn {
