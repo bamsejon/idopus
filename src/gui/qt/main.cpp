@@ -11,8 +11,8 @@ int main(int argc, char **argv) {
     const QString home =
         QStandardPaths::writableLocation(QStandardPaths::HomeLocation);
 
-    MainWindow w(home);
-    w.resize(900, 600);
+    MainWindow w(home, home);
+    w.resize(1400, 700);
     w.show();
     return app.exec();
 }

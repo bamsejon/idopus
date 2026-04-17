@@ -25,13 +25,20 @@ ListerWidget::ListerWidget(const QString &initialPath, QWidget *parent)
     m_view->setModel(m_model);
 
     auto *lay = new QVBoxLayout(this);
-    lay->setContentsMargins(0, 0, 0, 0);
+    lay->setContentsMargins(2, 2, 2, 2);
     lay->addWidget(m_view);
 
     connect(m_view, &QAbstractItemView::doubleClicked,
             this,   &ListerWidget::onDoubleClicked);
 
+    setActive(false);
     setPath(initialPath);
+}
+
+void ListerWidget::setActive(bool active) {
+    setStyleSheet(active
+        ? QStringLiteral("ListerWidget { border: 2px solid palette(highlight); }")
+        : QStringLiteral("ListerWidget { border: 2px solid transparent; }"));
 }
 
 void ListerWidget::setPath(const QString &path) {

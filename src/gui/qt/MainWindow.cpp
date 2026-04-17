@@ -2,13 +2,23 @@
 #include "ListerWidget.h"
 
 #include <QAction>
+#include <QApplication>
 #include <QKeySequence>
+#include <QSplitter>
 #include <QToolBar>
 
-MainWindow::MainWindow(const QString &initialPath, QWidget *parent)
+MainWindow::MainWindow(const QString &leftPath, const QString &rightPath,
+                       QWidget *parent)
     : QMainWindow(parent) {
-    m_lister = new ListerWidget(initialPath, this);
-    setCentralWidget(m_lister);
+    m_left  = new ListerWidget(leftPath,  this);
+    m_right = new ListerWidget(rightPath, this);
+
+    auto *splitter = new QSplitter(Qt::Horizontal, this);
+    splitter->addWidget(m_left);
+    splitter->addWidget(m_right);
+    splitter->setChildrenCollapsible(false);
+    splitter->setSizes({1, 1});
+    setCentralWidget(splitter);
 
     QToolBar *tb = addToolBar(QStringLiteral("Navigation"));
     tb->setMovable(false);
@@ -25,11 +35,36 @@ MainWindow::MainWindow(const QString &initialPath, QWidget *parent)
     m_actHome->setShortcut(QKeySequence(Qt::ALT | Qt::Key_Home));
     connect(m_actHome, &QAction::triggered, this, &MainWindow::onHome);
 
-    setWindowTitle(QStringLiteral("iDOpus — ") + initialPath);
-    connect(m_lister, &ListerWidget::pathChanged, this,
-            [this](const QString &p) { setWindowTitle(QStringLiteral("iDOpus — ") + p); });
+    connect(m_left,  &ListerWidget::pathChanged, this, [this](const QString&) { updateTitle(); });
+    connect(m_right, &ListerWidget::pathChanged, this, [this](const QString&) { updateTitle(); });
+
+    connect(qApp, &QApplication::focusChanged,
+            this, &MainWindow::onFocusChanged);
+
+    setActive(m_left);
 }
 
-void MainWindow::onParent()  { m_lister->goParent();  }
-void MainWindow::onRefresh() { m_lister->refresh();   }
-void MainWindow::onHome()    { m_lister->goHome();    }
+void MainWindow::setActive(ListerWidget *lister) {
+    if (lister == m_active) return;
+    if (m_active) m_active->setActive(false);
+    m_active = lister;
+    if (m_active) m_active->setActive(true);
+    updateTitle();
+}
+
+void MainWindow::updateTitle() {
+    if (!m_active) { setWindowTitle(QStringLiteral("iDOpus")); return; }
+    setWindowTitle(QStringLiteral("iDOpus — ") + m_active->currentPath());
+}
+
+void MainWindow::onFocusChanged(QWidget * /*old*/, QWidget *now) {
+    for (QWidget *w = now; w; w = w->parentWidget()) {
+        if (w == m_left)  { setActive(m_left);  return; }
+        if (w == m_right) { setActive(m_right); return; }
+    }
+    /* focus went to toolbar or outside — keep current active */
+}
+
+void MainWindow::onParent()  { if (m_active) m_active->goParent(); }
+void MainWindow::onRefresh() { if (m_active) m_active->refresh();  }
+void MainWindow::onHome()    { if (m_active) m_active->goHome();   }

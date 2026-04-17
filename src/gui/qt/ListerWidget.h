@@ -19,6 +19,7 @@ public slots:
     void goParent();
     void goHome();
     void refresh();
+    void setActive(bool active);
 
 signals:
     void pathChanged(const QString &newPath);
