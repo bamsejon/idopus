@@ -1,0 +1,33 @@
+cmake_minimum_required(VERSION 3.20)
+project(idopus VERSION 0.1.0 LANGUAGES C)
+
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+
+# macOS ARM target
+if(APPLE)
+    set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "Build for Apple Silicon")
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "13.0" CACHE STRING "macOS 13+")
+endif()
+
+# Include paths
+include_directories(${CMAKE_SOURCE_DIR}/include)
+
+# --- Platform Abstraction Layer (PAL) ---
+add_library(pal STATIC
+    src/pal/pal_memory.c
+    src/pal/pal_lists.c
+    src/pal/pal_sync.c
+    src/pal/pal_ipc.c
+    src/pal/pal_strings.c
+    src/pal/pal_file.c
+)
+target_link_libraries(pal PRIVATE pthread)
+
+# --- PAL test program ---
+add_executable(pal_test tests/pal_test.c)
+target_link_libraries(pal_test PRIVATE pal)
+
+# Future: core library, GUI app
+# add_library(core STATIC src/core/...)
+# add_executable(idopus src/gui/...)
