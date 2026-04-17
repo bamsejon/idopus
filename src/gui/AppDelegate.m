@@ -63,6 +63,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
 - (void)runCustomButton:(NSButton *)sender;
 - (void)addCustomButtonAction:(id)sender;
 - (void)removeCustomButtonAction:(id)sender;
+- (void)editCustomButtonAction:(id)sender;
 - (void)toggleQuickLook:(id)sender;
 - (void)sortByAction:(NSMenuItem *)sender;
 - (void)toggleReverseSortAction:(id)sender;
@@ -186,7 +187,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
 
 @class ListerDataSource;
 
-@interface ListerWindowController : NSWindowController <NSWindowDelegate, QLPreviewPanelDataSource, QLPreviewPanelDelegate, NSMenuDelegate>
+@interface ListerWindowController : NSWindowController <NSWindowDelegate, QLPreviewPanelDataSource, QLPreviewPanelDelegate, NSMenuDelegate, NSSearchFieldDelegate>
 @property (nonatomic, strong) ListerDataSource *dataSource;
 @property (nonatomic, strong) NSTableView *tableView;
 @property (nonatomic, strong) NSTextField *pathField;
@@ -201,9 +202,13 @@ typedef NS_ENUM(NSInteger, ListerState) {
 @property (nonatomic, assign) BOOL navigatingInHistory;
 @property (nonatomic, strong) NSButton *backButton;
 @property (nonatomic, strong) NSButton *forwardButton;
+@property (nonatomic, strong) NSSearchField *findField;
+@property (nonatomic, strong) NSLayoutConstraint *findHeightConstraint;
 - (void)setState:(ListerState)state;
 - (void)goBack:(id)sender;
 - (void)goForward:(id)sender;
+- (void)performFindPanelAction:(id)sender;
+- (void)findCancelAction:(id)sender;
 - (NSArray<NSString *> *)selectedPaths;
 - (NSArray<NSString *> *)selectedNames;
 - (void)reloadBuffer;
@@ -612,6 +617,18 @@ typedef NS_ENUM(NSInteger, ListerState) {
     [content addSubview:bank];
     _buttonBank = bank;
 
+    /* Find bar — hidden by default, slides in on ⌘F */
+    _findField = [[NSSearchField alloc] init];
+    _findField.translatesAutoresizingMaskIntoConstraints = NO;
+    _findField.placeholderString = @"Find in this directory";
+    _findField.target = self;
+    _findField.action = @selector(findFieldChanged:);
+    _findField.delegate = self;
+    _findField.sendsSearchStringImmediately = YES;
+    _findField.hidden = YES;
+    _findField.alphaValue = 0;
+    [content addSubview:_findField];
+
     /* State label (bottom-left: SOURCE/DEST/OFF — mirrors original status area) */
     _stateLabel = [NSTextField labelWithString:@"OFF"];
     _stateLabel.font = [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightBold];
@@ -653,7 +670,12 @@ typedef NS_ENUM(NSInteger, ListerState) {
         [_buttonBank.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:8],
         [_buttonBank.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-8],
 
-        [scrollView.topAnchor constraintEqualToAnchor:_buttonBank.bottomAnchor constant:6],
+        [_findField.topAnchor constraintEqualToAnchor:_buttonBank.bottomAnchor constant:4],
+        [_findField.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:8],
+        [_findField.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-8],
+        (_findHeightConstraint = [_findField.heightAnchor constraintEqualToConstant:0]),
+
+        [scrollView.topAnchor constraintEqualToAnchor:_findField.bottomAnchor constant:4],
         [scrollView.leadingAnchor constraintEqualToAnchor:content.leadingAnchor],
         [scrollView.trailingAnchor constraintEqualToAnchor:content.trailingAnchor],
         [scrollView.bottomAnchor constraintEqualToAnchor:_statusBar.topAnchor constant:-4],
@@ -701,6 +723,53 @@ typedef NS_ENUM(NSInteger, ListerState) {
 - (void)updateHistoryButtons {
     _backButton.enabled    = _historyIndex > 0;
     _forwardButton.enabled = _historyIndex >= 0 && _historyIndex < (NSInteger)_history.count - 1;
+}
+
+#pragma mark Find
+
+/* Cmd-F: show the search field and focus it. Cmd-F again / Esc closes.
+ * The search uses the existing filter.showPattern = *<text>* so it plugs
+ * straight into the dir_buffer filter machinery. */
+- (void)performFindPanelAction:(id)sender {
+    if (_findField.isHidden) [self showFindBar];
+    else                      [self.window makeFirstResponder:_findField];
+}
+
+- (void)showFindBar {
+    _findField.hidden = NO;
+    _findHeightConstraint.constant = 22;
+    _findField.alphaValue = 1;
+    [self.window makeFirstResponder:_findField];
+    _findField.stringValue = @"";
+}
+
+- (void)hideFindBar {
+    _findField.hidden = YES;
+    _findHeightConstraint.constant = 0;
+    _findField.alphaValue = 0;
+    _findField.stringValue = @"";
+    _dataSource.showPattern = nil;
+    [_dataSource applyCurrentFilter];
+    [self updateStatusBar];
+    [self.window makeFirstResponder:_tableView];
+}
+
+- (void)findCancelAction:(id)sender { [self hideFindBar]; }
+
+- (void)findFieldChanged:(NSSearchField *)sender {
+    NSString *q = [sender.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    _dataSource.showPattern = q.length ? [NSString stringWithFormat:@"*%@*", q] : nil;
+    [_dataSource applyCurrentFilter];
+    [self updateStatusBar];
+}
+
+/* Esc in the search field → close search */
+- (BOOL)control:(NSControl *)control textView:(NSTextView *)textView doCommandBySelector:(SEL)sel {
+    if (control == _findField && sel == @selector(cancelOperation:)) {
+        [self hideFindBar];
+        return YES;
+    }
+    return NO;
 }
 
 - (void)goBack:(id)sender {
@@ -1608,6 +1677,8 @@ typedef NS_ENUM(NSInteger, ListerState) {
     [fileMenu addItemWithTitle:@"Back"    action:@selector(goBack:)    keyEquivalent:@"["];
     [fileMenu addItemWithTitle:@"Forward" action:@selector(goForward:) keyEquivalent:@"]"];
     [fileMenu addItem:[NSMenuItem separatorItem]];
+    [fileMenu addItemWithTitle:@"Find"    action:@selector(performFindPanelAction:) keyEquivalent:@"f"];
+    [fileMenu addItem:[NSMenuItem separatorItem]];
     [fileMenu addItemWithTitle:@"Close" action:@selector(performClose:) keyEquivalent:@"w"];
     fileItem.submenu = fileMenu;
     [mainMenu addItem:fileItem];
@@ -1633,6 +1704,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
     selectItem.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
     [funcMenu addItem:[NSMenuItem separatorItem]];
     [funcMenu addItemWithTitle:@"Add Custom Button…"    action:@selector(addCustomButtonAction:)    keyEquivalent:@""];
+    [funcMenu addItemWithTitle:@"Edit Custom Button…"   action:@selector(editCustomButtonAction:)   keyEquivalent:@""];
     [funcMenu addItemWithTitle:@"Remove Custom Button…" action:@selector(removeCustomButtonAction:) keyEquivalent:@""];
     funcItem.submenu = funcMenu;
     [mainMenu addItem:funcItem];
@@ -2127,34 +2199,149 @@ typedef NS_ENUM(NSInteger, ListerState) {
     }
 }
 
+- (NSString *)customButtonHelpText {
+    return
+        @"Placeholders\n"
+        @"   {FILES}   space-separated, quoted paths of the current selection\n"
+        @"   {PATH}    the active Lister's directory\n"
+        @"\n"
+        @"The command runs via /bin/sh -c with the Lister's directory as cwd,\n"
+        @"inheriting iDOpus's environment (which is the macOS GUI PATH).\n"
+        @"\n"
+        @"To open a Mac app reliably, prefer macOS's own /usr/bin/open:\n"
+        @"   open -a \"Visual Studio Code\" {FILES}\n"
+        @"   open -a TextEdit {FILES}\n"
+        @"   open -a Terminal {PATH}\n"
+        @"\n"
+        @"CLI tools need to be in PATH or referenced by full path:\n"
+        @"   /usr/bin/tar czf archive.tar.gz {FILES}\n"
+        @"   /opt/homebrew/bin/rg pattern {PATH}\n"
+        @"\n"
+        @"Anything you can type in Terminal (with quoted filenames already\n"
+        @"substituted) works. Remember to quote your own args if they may\n"
+        @"contain spaces.";
+}
+
+- (void)showCustomButtonHelp:(id)sender {
+    NSAlert *a = [[NSAlert alloc] init];
+    a.messageText = @"Custom Button — How it works";
+    a.informativeText = [self customButtonHelpText];
+    [a addButtonWithTitle:@"OK"];
+    [a runModal];
+}
+
+/* Build the shared accessory view used by Add + Edit dialogs. Returns a
+ * dictionary with the title/command fields for the caller to read. */
+- (NSDictionary *)buildCustomButtonFormWithTitle:(NSString *)initialTitle
+                                          command:(NSString *)initialCommand
+                                         intoView:(out NSView **)outView {
+    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 440, 104)];
+
+    NSTextField *titleLbl = [NSTextField labelWithString:@"Title:"];
+    titleLbl.frame = NSMakeRect(0, 78, 72, 20);
+    NSTextField *titleField = [[NSTextField alloc] initWithFrame:NSMakeRect(76, 74, 320, 24)];
+    titleField.stringValue = initialTitle ?: @"";
+
+    /* Help button (ⓘ) to the right of Title */
+    NSButton *helpBtn = [NSButton buttonWithTitle:@""
+                                           target:self
+                                           action:@selector(showCustomButtonHelp:)];
+    helpBtn.bezelStyle = NSBezelStyleHelpButton;
+    helpBtn.frame = NSMakeRect(404, 74, 24, 24);
+    helpBtn.toolTip = @"How custom buttons work";
+
+    NSTextField *cmdLbl = [NSTextField labelWithString:@"Command:"];
+    cmdLbl.frame = NSMakeRect(0, 42, 72, 20);
+    NSTextField *cmdField = [[NSTextField alloc] initWithFrame:NSMakeRect(76, 38, 352, 24)];
+    cmdField.stringValue = initialCommand ?: @"";
+    cmdField.placeholderString = @"e.g. open -a \"Visual Studio Code\" {FILES}";
+
+    NSTextField *hint = [NSTextField wrappingLabelWithString:
+        @"Placeholders: {FILES} = selection, {PATH} = directory. Click ⓘ for examples."];
+    hint.font = [NSFont systemFontOfSize:10];
+    hint.textColor = [NSColor secondaryLabelColor];
+    hint.frame = NSMakeRect(76, 0, 352, 30);
+
+    [acc addSubview:titleLbl]; [acc addSubview:titleField]; [acc addSubview:helpBtn];
+    [acc addSubview:cmdLbl];   [acc addSubview:cmdField];
+    [acc addSubview:hint];
+
+    if (outView) *outView = acc;
+    return @{ @"title": titleField, @"command": cmdField };
+}
+
 - (void)addCustomButtonAction:(id)sender {
     NSAlert *alert = [[NSAlert alloc] init];
     alert.messageText = @"Add Custom Button";
-    alert.informativeText = @"Use {FILES} for selected paths, {PATH} for current dir.";
+    alert.informativeText = @"Title and shell command for the new button.";
 
-    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 360, 68)];
-    NSTextField *titleField = [[NSTextField alloc] initWithFrame:NSMakeRect(70, 40, 290, 24)];
-    NSTextField *titleLbl   = [NSTextField labelWithString:@"Title:"];
-    titleLbl.frame = NSMakeRect(0, 44, 64, 20);
-    NSTextField *cmdField = [[NSTextField alloc] initWithFrame:NSMakeRect(70, 8, 290, 24)];
-    cmdField.placeholderString = @"e.g. open -a TextEdit {FILES}";
-    NSTextField *cmdLbl  = [NSTextField labelWithString:@"Command:"];
-    cmdLbl.frame = NSMakeRect(0, 12, 64, 20);
-    [acc addSubview:titleLbl]; [acc addSubview:titleField];
-    [acc addSubview:cmdLbl];   [acc addSubview:cmdField];
+    NSView *acc = nil;
+    NSDictionary *fields = [self buildCustomButtonFormWithTitle:nil command:nil intoView:&acc];
     alert.accessoryView = acc;
     [alert addButtonWithTitle:@"Add"];
     [alert addButtonWithTitle:@"Cancel"];
-    [alert.window setInitialFirstResponder:titleField];
+    [alert.window setInitialFirstResponder:fields[@"title"]];
 
     if ([alert runModal] != NSAlertFirstButtonReturn) return;
-    NSString *title = [titleField.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
-    NSString *cmd = [cmdField.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+
+    NSString *title = [((NSTextField *)fields[@"title"]).stringValue
+                        stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    NSString *cmd = [((NSTextField *)fields[@"command"]).stringValue
+                      stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
     if (title.length == 0 || cmd.length == 0) return;
 
     NSMutableArray *all = [[[NSUserDefaults standardUserDefaults] arrayForKey:@"customButtons"] mutableCopy] ?: [NSMutableArray array];
     [all addObject:@{ @"title": title, @"command": cmd }];
     [[NSUserDefaults standardUserDefaults] setObject:all forKey:@"customButtons"];
+    [_buttonBankPanel rebuildGrid];
+}
+
+- (void)editCustomButtonAction:(id)sender {
+    NSArray<NSDictionary *> *all = [[NSUserDefaults standardUserDefaults] arrayForKey:@"customButtons"] ?: @[];
+    if (all.count == 0) {
+        [self showAlert:@"Edit Custom Button" info:@"No custom buttons yet." style:NSAlertStyleInformational];
+        return;
+    }
+
+    /* Step 1: pick which one */
+    NSAlert *pick = [[NSAlert alloc] init];
+    pick.messageText = @"Edit Custom Button";
+    pick.informativeText = @"Which button do you want to edit?";
+    NSPopUpButton *popup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(0, 0, 360, 26)];
+    for (NSDictionary *b in all) {
+        [popup addItemWithTitle:[NSString stringWithFormat:@"%@ — %@", b[@"title"], b[@"command"]]];
+    }
+    pick.accessoryView = popup;
+    [pick addButtonWithTitle:@"Edit…"];
+    [pick addButtonWithTitle:@"Cancel"];
+    if ([pick runModal] != NSAlertFirstButtonReturn) return;
+    NSInteger idx = popup.indexOfSelectedItem;
+    if (idx < 0 || idx >= (NSInteger)all.count) return;
+    NSDictionary *current = all[idx];
+
+    /* Step 2: show the edit form pre-filled */
+    NSAlert *form = [[NSAlert alloc] init];
+    form.messageText = @"Edit Custom Button";
+    form.informativeText = @"Update the title or command.";
+    NSView *acc = nil;
+    NSDictionary *fields = [self buildCustomButtonFormWithTitle:current[@"title"]
+                                                         command:current[@"command"]
+                                                        intoView:&acc];
+    form.accessoryView = acc;
+    [form addButtonWithTitle:@"Save"];
+    [form addButtonWithTitle:@"Cancel"];
+    [form.window setInitialFirstResponder:fields[@"title"]];
+    if ([form runModal] != NSAlertFirstButtonReturn) return;
+
+    NSString *title = [((NSTextField *)fields[@"title"]).stringValue
+                        stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    NSString *cmd = [((NSTextField *)fields[@"command"]).stringValue
+                      stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    if (title.length == 0 || cmd.length == 0) return;
+
+    NSMutableArray *updated = [all mutableCopy];
+    updated[idx] = @{ @"title": title, @"command": cmd };
+    [[NSUserDefaults standardUserDefaults] setObject:updated forKey:@"customButtons"];
     [_buttonBankPanel rebuildGrid];
 }
 
