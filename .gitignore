@@ -1,0 +1,16 @@
+# Build
+build/
+*.o
+*.d
+*.dylib
+*.app
+DerivedData/
+xcuserdata/
+
+# macOS
+.DS_Store
+*.xcworkspace
+
+# IDE
+.vscode/
+.idea/
