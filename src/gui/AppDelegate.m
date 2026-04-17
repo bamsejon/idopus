@@ -1539,23 +1539,37 @@ typedef NS_ENUM(NSInteger, ListerState) {
         }
     }
 
-    /* Mounted volumes (DOpus "Devices") */
-    pal_volume_t vols[64];
-    int nvol = pal_volumes_list(vols, 64);
-    if (nvol > 0) {
+    /* Mounted volumes (DOpus "Devices") — only user-browsable ones.
+     * NSVolumeEnumerationSkipHiddenVolumes filters out APFS system
+     * containers like /System/Volumes/VM, Preboot, xarts, etc. */
+    NSArray<NSURL *> *volUrls = [[NSFileManager defaultManager]
+        mountedVolumeURLsIncludingResourceValuesForKeys:@[NSURLVolumeNameKey,
+                                                          NSURLVolumeTotalCapacityKey,
+                                                          NSURLVolumeIsBrowsableKey]
+                                                options:NSVolumeEnumerationSkipHiddenVolumes];
+    NSMutableArray<NSURL *> *userVols = [NSMutableArray array];
+    for (NSURL *u in volUrls) {
+        NSNumber *browsable = nil;
+        [u getResourceValue:&browsable forKey:NSURLVolumeIsBrowsableKey error:nil];
+        if (browsable.boolValue) [userVols addObject:u];
+    }
+    if (userVols.count > 0) {
         [menu addItem:[NSMenuItem separatorItem]];
         NSMenuItem *header = [[NSMenuItem alloc] initWithTitle:@"Devices" action:NULL keyEquivalent:@""];
         header.enabled = NO;
         [menu addItem:header];
-        for (int i = 0; i < nvol; i++) {
-            NSString *name = [NSString stringWithUTF8String:vols[i].name];
-            NSString *mount = [NSString stringWithUTF8String:vols[i].mount_point];
-            char szBuf[32]; pal_format_size(vols[i].total_bytes, szBuf, sizeof(szBuf));
-            NSString *title = [NSString stringWithFormat:@"  %@ (%s)", name, szBuf];
+        for (NSURL *u in userVols) {
+            NSString *name = nil;
+            NSNumber *cap = nil;
+            [u getResourceValue:&name forKey:NSURLVolumeNameKey error:nil];
+            [u getResourceValue:&cap forKey:NSURLVolumeTotalCapacityKey error:nil];
+            char szBuf[32]; pal_format_size(cap.unsignedLongLongValue, szBuf, sizeof(szBuf));
+            NSString *title = [NSString stringWithFormat:@"  %@ (%s)",
+                               name ?: u.path.lastPathComponent, szBuf];
             NSMenuItem *it = [menu addItemWithTitle:title
                                              action:@selector(navigateToBookmark:)
                                       keyEquivalent:@""];
-            it.representedObject = mount;
+            it.representedObject = u.path;
             it.target = self;
         }
     }
