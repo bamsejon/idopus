@@ -68,6 +68,11 @@ typedef NS_ENUM(NSInteger, ListerState) {
 - (void)addCustomButtonAction:(id)sender;
 - (void)removeCustomButtonAction:(id)sender;
 - (void)editCustomButtonAction:(id)sender;
+- (void)addFileTypeActionAction:(id)sender;
+- (void)manageFileTypeActionsAction:(id)sender;
+- (NSArray<NSDictionary *> *)fileTypeActionsForExt:(NSString *)ext;
+- (NSDictionary *)defaultFileTypeActionForExt:(NSString *)ext;
+- (void)runFileTypeAction:(NSDictionary *)action onPath:(NSString *)path sourceLister:(ListerWindowController *)src;
 - (void)toggleQuickLook:(id)sender;
 - (void)sortByAction:(NSMenuItem *)sender;
 - (void)toggleReverseSortAction:(id)sender;
@@ -727,8 +732,11 @@ typedef NS_ENUM(NSInteger, ListerState) {
 
     /* Right-click context menu — items route to appDelegate actions */
     NSMenu *menu = [[NSMenu alloc] init];
-    menu.delegate = self;    /* rebuild Open With / Extract dynamically per clicked row */
+    menu.delegate = self;    /* rebuild Open With / Actions / Extract dynamically per clicked row */
     [menu addItemWithTitle:@"Open"           action:@selector(openSelectionAction:) keyEquivalent:@""].target = self;
+    NSMenuItem *actions = [menu addItemWithTitle:@"Actions" action:NULL keyEquivalent:@""];
+    actions.submenu = [[NSMenu alloc] initWithTitle:@"Actions"];
+    actions.tag = 2;  /* identify in menuNeedsUpdate */
     NSMenuItem *openWith = [menu addItemWithTitle:@"Open With" action:NULL keyEquivalent:@""];
     openWith.submenu = [[NSMenu alloc] initWithTitle:@"Open With"];
     [menu addItemWithTitle:@"Reveal in Finder" action:@selector(revealInFinderAction:) keyEquivalent:@""].target = self;
@@ -1103,14 +1111,16 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     }
 }
 
-/* Rebuild Open With + Extract based on the right-clicked (or selected) row */
+/* Rebuild Open With + Actions + Extract based on the right-clicked (or selected) row */
 - (void)menuNeedsUpdate:(NSMenu *)menu {
     if (menu != _tableView.menu) return;
     NSMenuItem *openWithItem = nil;
     NSMenuItem *extractItem = nil;
+    NSMenuItem *actionsItem = nil;
     for (NSMenuItem *it in menu.itemArray) {
         if ([it.title isEqualToString:@"Open With"]) openWithItem = it;
         if (it.tag == 1 && [it.title isEqualToString:@"Extract"]) extractItem = it;
+        if (it.tag == 2 && [it.title isEqualToString:@"Actions"]) actionsItem = it;
     }
 
     NSString *path = [self pathForContextClick];
@@ -1118,6 +1128,25 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     /* Extract: visible only when the clicked file is a recognised archive */
     if (extractItem) {
         extractItem.hidden = !(path && [self pathIsArchive:path]);
+    }
+
+    /* Actions: populate with user-defined file type actions for this ext */
+    if (actionsItem) {
+        NSMenu *sub = actionsItem.submenu;
+        [sub removeAllItems];
+        NSString *ext = path.pathExtension;
+        NSArray<NSDictionary *> *actions = ext.length
+            ? [_appDelegate fileTypeActionsForExt:ext] : @[];
+        actionsItem.hidden = actions.count == 0;
+        for (NSDictionary *a in actions) {
+            NSString *label = [a[@"default"] boolValue]
+                ? [NSString stringWithFormat:@"%@ (default)", a[@"title"]] : a[@"title"];
+            NSMenuItem *mi = [sub addItemWithTitle:label
+                                            action:@selector(runFileTypeActionMenu:)
+                                     keyEquivalent:@""];
+            mi.target = self;
+            mi.representedObject = @{ @"action": a, @"path": path };
+        }
     }
 
     if (!openWithItem) return;
@@ -1152,6 +1181,14 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
                                 keyEquivalent:@""];
     other.target = self;
     other.representedObject = path;
+}
+
+- (void)runFileTypeActionMenu:(NSMenuItem *)sender {
+    NSDictionary *d = sender.representedObject;
+    NSDictionary *action = d[@"action"];
+    NSString *path = d[@"path"];
+    if (!action || !path) return;
+    [_appDelegate runFileTypeAction:action onPath:path sourceLister:self];
 }
 
 - (NSString *)pathForContextClick {
@@ -1640,12 +1677,23 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
                       entry->name, newpath, sizeof(newpath));
         [self loadPath:[NSString stringWithUTF8String:newpath]];
     } else {
-        /* Open file with default app */
         char fullpath[4096];
         pal_path_join([_currentPath fileSystemRepresentation],
                       entry->name, fullpath, sizeof(fullpath));
-        [[NSWorkspace sharedWorkspace] openURL:
-            [NSURL fileURLWithPath:[NSString stringWithUTF8String:fullpath]]];
+        NSString *path = [NSString stringWithUTF8String:fullpath];
+
+        /* User-defined default action for this extension? */
+        const char *ext = pal_path_extension(entry->name);
+        if (ext && *ext) {
+            NSDictionary *def = [_appDelegate defaultFileTypeActionForExt:
+                                 [NSString stringWithUTF8String:ext]];
+            if (def) {
+                [_appDelegate runFileTypeAction:def onPath:path sourceLister:self];
+                return;
+            }
+        }
+        /* Fallback: macOS default app */
+        [[NSWorkspace sharedWorkspace] openURL:[NSURL fileURLWithPath:path]];
     }
 }
 
@@ -2215,6 +2263,9 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     [funcMenu addItemWithTitle:@"Add Custom Button…"    action:@selector(addCustomButtonAction:)    keyEquivalent:@""];
     [funcMenu addItemWithTitle:@"Edit Custom Button…"   action:@selector(editCustomButtonAction:)   keyEquivalent:@""];
     [funcMenu addItemWithTitle:@"Remove Custom Button…" action:@selector(removeCustomButtonAction:) keyEquivalent:@""];
+    [funcMenu addItem:[NSMenuItem separatorItem]];
+    [funcMenu addItemWithTitle:@"Add File Type Action…"    action:@selector(addFileTypeActionAction:)    keyEquivalent:@""];
+    [funcMenu addItemWithTitle:@"Remove File Type Action…" action:@selector(manageFileTypeActionsAction:) keyEquivalent:@""];
     funcItem.submenu = funcMenu;
     [mainMenu addItem:funcItem];
 
@@ -3066,6 +3117,180 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
                info:[NSString stringWithFormat:@"%lu item%@ in SOURCE not present in DEST (by name).",
                      (unsigned long)idx.count, idx.count == 1 ? @"" : @"s"]
               style:NSAlertStyleInformational];
+}
+
+#pragma mark File type actions
+
+/* Storage: NSUserDefaults "fileTypeActions" =
+ *   { "<ext>": [ { title, command, default(BOOL) }, ... ], ... }
+ * Extension keys are lowercase, leading dot stripped. */
+
+- (NSArray<NSDictionary *> *)fileTypeActionsForExt:(NSString *)ext {
+    if (!ext.length) return @[];
+    NSString *key = ext.lowercaseString;
+    if ([key hasPrefix:@"."]) key = [key substringFromIndex:1];
+    NSDictionary *all = [[NSUserDefaults standardUserDefaults] dictionaryForKey:@"fileTypeActions"];
+    return all[key] ?: @[];
+}
+
+- (NSDictionary *)defaultFileTypeActionForExt:(NSString *)ext {
+    for (NSDictionary *a in [self fileTypeActionsForExt:ext]) {
+        if ([a[@"default"] boolValue]) return a;
+    }
+    return nil;
+}
+
+- (void)runFileTypeAction:(NSDictionary *)action
+                   onPath:(NSString *)path
+             sourceLister:(ListerWindowController *)src {
+    NSString *cmd = action[@"command"];
+    if (!cmd.length) return;
+
+    /* {FILE} = the single path; {FILES} = if src has selection, quoted list;
+     * {PATH} = src.currentPath */
+    NSString *fileArg = [NSString stringWithFormat:@"'%@'",
+                         [path stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"]];
+    NSArray<NSString *> *paths = [src selectedPaths];
+    NSMutableArray<NSString *> *quoted = [NSMutableArray array];
+    for (NSString *p in paths) {
+        NSString *e = [p stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
+        [quoted addObject:[NSString stringWithFormat:@"'%@'", e]];
+    }
+    NSString *filesArg = quoted.count ? [quoted componentsJoinedByString:@" "] : fileArg;
+    NSString *pathArg = [NSString stringWithFormat:@"'%@'",
+                         [src.currentPath stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"]];
+
+    NSString *expanded = [cmd stringByReplacingOccurrencesOfString:@"{FILE}" withString:fileArg];
+    expanded = [expanded stringByReplacingOccurrencesOfString:@"{FILES}" withString:filesArg];
+    expanded = [expanded stringByReplacingOccurrencesOfString:@"{PATH}" withString:pathArg];
+
+    NSTask *task = [[NSTask alloc] init];
+    task.executableURL = [NSURL fileURLWithPath:@"/bin/sh"];
+    task.arguments = @[@"-c", expanded];
+    task.currentDirectoryURL = [NSURL fileURLWithPath:src.currentPath];
+    NSError *err = nil;
+    if (![task launchAndReturnError:&err]) {
+        [self showAlert:@"Action failed" info:err.localizedDescription style:NSAlertStyleWarning];
+    }
+}
+
+/* Shared Add/Edit form accessory view */
+- (NSDictionary *)buildFileTypeForm:(NSView **)outView
+                          extension:(NSString *)initialExt
+                              title:(NSString *)initialTitle
+                            command:(NSString *)initialCommand
+                          isDefault:(BOOL)initialDefault {
+    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 460, 132)];
+
+    NSTextField *extLbl = [NSTextField labelWithString:@"Extension:"];
+    extLbl.frame = NSMakeRect(0, 104, 90, 20);
+    NSTextField *extField = [[NSTextField alloc] initWithFrame:NSMakeRect(94, 100, 120, 24)];
+    extField.placeholderString = @"txt (no dot)";
+    extField.stringValue = initialExt ?: @"";
+
+    NSTextField *titleLbl = [NSTextField labelWithString:@"Title:"];
+    titleLbl.frame = NSMakeRect(0, 72, 90, 20);
+    NSTextField *titleField = [[NSTextField alloc] initWithFrame:NSMakeRect(94, 68, 342, 24)];
+    titleField.stringValue = initialTitle ?: @"";
+
+    NSTextField *cmdLbl = [NSTextField labelWithString:@"Command:"];
+    cmdLbl.frame = NSMakeRect(0, 40, 90, 20);
+    NSTextField *cmdField = [[NSTextField alloc] initWithFrame:NSMakeRect(94, 36, 342, 24)];
+    cmdField.placeholderString = @"open -a TextEdit {FILE}";
+    cmdField.stringValue = initialCommand ?: @"";
+
+    NSButton *defBox = [NSButton checkboxWithTitle:@"Default action (runs on double-click)"
+                                            target:nil action:nil];
+    defBox.frame = NSMakeRect(94, 6, 342, 20);
+    defBox.state = initialDefault ? NSControlStateValueOn : NSControlStateValueOff;
+
+    for (NSView *v in @[extLbl, extField, titleLbl, titleField, cmdLbl, cmdField, defBox])
+        [acc addSubview:v];
+
+    if (outView) *outView = acc;
+    return @{ @"ext": extField, @"title": titleField, @"cmd": cmdField, @"default": defBox };
+}
+
+- (void)addFileTypeActionAction:(id)sender {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Add File Type Action";
+    alert.informativeText = @"Placeholders: {FILE} / {FILES} / {PATH}. Click ⓘ for examples.";
+    NSView *acc = nil;
+    NSDictionary *fields = [self buildFileTypeForm:&acc extension:nil title:nil command:nil isDefault:NO];
+    alert.accessoryView = acc;
+    [alert addButtonWithTitle:@"Add"];
+    [alert addButtonWithTitle:@"Cancel"];
+    [alert.window setInitialFirstResponder:fields[@"ext"]];
+    if ([alert runModal] != NSAlertFirstButtonReturn) return;
+
+    NSString *ext = [((NSTextField *)fields[@"ext"]).stringValue stringByTrimmingCharactersInSet:
+                     [NSCharacterSet whitespaceCharacterSet]].lowercaseString;
+    if ([ext hasPrefix:@"."]) ext = [ext substringFromIndex:1];
+    NSString *title = [((NSTextField *)fields[@"title"]).stringValue stringByTrimmingCharactersInSet:
+                       [NSCharacterSet whitespaceCharacterSet]];
+    NSString *cmd = [((NSTextField *)fields[@"cmd"]).stringValue stringByTrimmingCharactersInSet:
+                     [NSCharacterSet whitespaceCharacterSet]];
+    BOOL isDefault = ((NSButton *)fields[@"default"]).state == NSControlStateValueOn;
+    if (!ext.length || !title.length || !cmd.length) return;
+
+    NSMutableDictionary *all = [([[NSUserDefaults standardUserDefaults] dictionaryForKey:@"fileTypeActions"] ?: @{}) mutableCopy];
+    NSMutableArray *list = [(all[ext] ?: @[]) mutableCopy];
+    /* If adding a new default, clear existing defaults in this extension. */
+    if (isDefault) {
+        NSMutableArray *cleared = [NSMutableArray array];
+        for (NSDictionary *a in list) {
+            NSMutableDictionary *m = [a mutableCopy];
+            m[@"default"] = @NO;
+            [cleared addObject:m];
+        }
+        list = cleared;
+    }
+    [list addObject:@{ @"title": title, @"command": cmd, @"default": @(isDefault) }];
+    all[ext] = list;
+    [[NSUserDefaults standardUserDefaults] setObject:all forKey:@"fileTypeActions"];
+}
+
+- (void)manageFileTypeActionsAction:(id)sender {
+    NSDictionary *all = [[NSUserDefaults standardUserDefaults] dictionaryForKey:@"fileTypeActions"];
+    if (all.count == 0) {
+        [self showAlert:@"Manage File Type Actions"
+                   info:@"No file type actions defined yet. Use “Add File Type Action…” to create one."
+                  style:NSAlertStyleInformational];
+        return;
+    }
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Remove File Type Action";
+    alert.informativeText = @"Pick an action to remove.";
+
+    /* Flatten (ext, action) pairs into a single popup */
+    NSMutableArray *flat = [NSMutableArray array];
+    NSPopUpButton *popup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(0, 0, 460, 26)];
+    for (NSString *ext in [all.allKeys sortedArrayUsingSelector:@selector(compare:)]) {
+        for (NSDictionary *a in all[ext]) {
+            [flat addObject:@{ @"ext": ext, @"action": a }];
+            NSString *title = [NSString stringWithFormat:@".%@ — %@%@",
+                               ext, a[@"title"],
+                               [a[@"default"] boolValue] ? @" (default)" : @""];
+            [popup addItemWithTitle:title];
+        }
+    }
+    alert.accessoryView = popup;
+    [alert addButtonWithTitle:@"Remove"];
+    [alert addButtonWithTitle:@"Cancel"];
+    if ([alert runModal] != NSAlertFirstButtonReturn) return;
+
+    NSInteger idx = popup.indexOfSelectedItem;
+    if (idx < 0 || idx >= (NSInteger)flat.count) return;
+    NSString *ext = flat[idx][@"ext"];
+    NSDictionary *action = flat[idx][@"action"];
+
+    NSMutableDictionary *mAll = [all mutableCopy];
+    NSMutableArray *list = [mAll[ext] mutableCopy];
+    [list removeObject:action];
+    if (list.count == 0) [mAll removeObjectForKey:ext];
+    else                 mAll[ext] = list;
+    [[NSUserDefaults standardUserDefaults] setObject:mAll forKey:@"fileTypeActions"];
 }
 
 - (void)selectPatternAction:(id)sender {
