@@ -7,6 +7,7 @@
 #import <Cocoa/Cocoa.h>
 #import <Quartz/Quartz.h>
 #import <QuickLookThumbnailing/QuickLookThumbnailing.h>
+#import <CoreServices/CoreServices.h>
 #import <objc/runtime.h>
 #include <sys/stat.h>
 #include <pwd.h>
@@ -206,6 +207,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
 @property (nonatomic, strong) NSButton *forwardButton;
 @property (nonatomic, strong) NSSearchField *findField;
 @property (nonatomic, strong) NSLayoutConstraint *findHeightConstraint;
+@property (nonatomic, assign) FSEventStreamRef fsStream;
 - (void)setState:(ListerState)state;
 - (void)goBack:(id)sender;
 - (void)goForward:(id)sender;
@@ -836,6 +838,48 @@ typedef NS_ENUM(NSInteger, ListerState) {
         }
     }
     [self updateHistoryButtons];
+    [self startWatchingPath:path];
+}
+
+#pragma mark FSEvents auto-refresh
+
+static void _listerFSEventCallback(ConstFSEventStreamRef stream,
+                                    void *info,
+                                    size_t numEvents,
+                                    void *eventPaths,
+                                    const FSEventStreamEventFlags flags[],
+                                    const FSEventStreamEventId ids[]) {
+    ListerWindowController *ctrl = (__bridge ListerWindowController *)info;
+    [ctrl reloadBuffer];
+}
+
+- (void)startWatchingPath:(NSString *)path {
+    [self stopWatching];
+    if (!path) return;
+    FSEventStreamContext ctx = {0, (__bridge void *)self, NULL, NULL, NULL};
+    _fsStream = FSEventStreamCreate(NULL,
+                                     &_listerFSEventCallback,
+                                     &ctx,
+                                     (__bridge CFArrayRef)@[path],
+                                     kFSEventStreamEventIdSinceNow,
+                                     0.5,   /* latency seconds — coalesces bursts */
+                                     kFSEventStreamCreateFlagNone);
+    if (_fsStream) {
+        FSEventStreamSetDispatchQueue(_fsStream, dispatch_get_main_queue());
+        FSEventStreamStart(_fsStream);
+    }
+}
+
+- (void)stopWatching {
+    if (!_fsStream) return;
+    FSEventStreamStop(_fsStream);
+    FSEventStreamInvalidate(_fsStream);
+    FSEventStreamRelease(_fsStream);
+    _fsStream = NULL;
+}
+
+- (void)dealloc {
+    [self stopWatching];
 }
 
 - (void)updateHistoryButtons {
