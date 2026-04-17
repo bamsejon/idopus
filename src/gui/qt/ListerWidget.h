@@ -4,6 +4,8 @@
 #include <QString>
 
 class QTreeView;
+class QLineEdit;
+class QPushButton;
 class QModelIndex;
 class DirBufferModel;
 
@@ -18,7 +20,10 @@ public slots:
     void setPath(const QString &path);
     void goParent();
     void goHome();
+    void goRoot();
     void refresh();
+    void selectAll();
+    void selectNone();
     void setActive(bool active);
 
 signals:
@@ -26,9 +31,26 @@ signals:
 
 private slots:
     void onDoubleClicked(const QModelIndex &index);
+    void onPathEdited();
 
 private:
-    QTreeView      *m_view  = nullptr;
-    DirBufferModel *m_model = nullptr;
+    QPushButton *makeButton(const QString &text, bool enabled);
+
+    QTreeView      *m_view       = nullptr;
+    DirBufferModel *m_model      = nullptr;
+    QLineEdit      *m_pathField  = nullptr;
+    QPushButton    *m_parentBtn  = nullptr;
+    QPushButton    *m_refreshBtn = nullptr;
+    QPushButton    *m_parent2Btn = nullptr;
+    QPushButton    *m_rootBtn    = nullptr;
+    QPushButton    *m_allBtn     = nullptr;
+    QPushButton    *m_noneBtn    = nullptr;
+    QPushButton    *m_copyBtn    = nullptr;
+    QPushButton    *m_moveBtn    = nullptr;
+    QPushButton    *m_deleteBtn  = nullptr;
+    QPushButton    *m_renameBtn  = nullptr;
+    QPushButton    *m_makeDirBtn = nullptr;
+    QPushButton    *m_infoBtn    = nullptr;
+    QPushButton    *m_filterBtn  = nullptr;
     QString         m_path;
 };
