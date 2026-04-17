@@ -182,6 +182,9 @@ typedef NS_ENUM(NSInteger, ListerState) {
 @property (nonatomic, assign) ListerState state;
 @property (nonatomic, weak) IDOpusAppDelegate *appDelegate;
 - (void)setState:(ListerState)state;
+- (NSArray<NSString *> *)selectedPaths;
+- (NSArray<NSString *> *)selectedNames;
+- (void)reloadBuffer;
 @end
 
 @implementation ListerWindowController
@@ -430,6 +433,35 @@ typedef NS_ENUM(NSInteger, ListerState) {
     }
 }
 
+#pragma mark Selection + reload
+
+- (NSArray<NSString *> *)selectedNames {
+    NSMutableArray<NSString *> *names = [NSMutableArray array];
+    NSIndexSet *rows = _tableView.selectedRowIndexes;
+    [rows enumerateIndexesUsingBlock:^(NSUInteger row, BOOL *stop) {
+        dir_entry_t *e = dir_buffer_get_entry(_dataSource.buffer, (int)row);
+        if (e && e->name) [names addObject:[NSString stringWithUTF8String:e->name]];
+    }];
+    return names;
+}
+
+- (NSArray<NSString *> *)selectedPaths {
+    NSArray<NSString *> *names = [self selectedNames];
+    NSMutableArray<NSString *> *paths = [NSMutableArray arrayWithCapacity:names.count];
+    for (NSString *name in names) {
+        char full[4096];
+        pal_path_join([_currentPath fileSystemRepresentation],
+                      [name fileSystemRepresentation], full, sizeof(full));
+        [paths addObject:[NSString stringWithUTF8String:full]];
+    }
+    return paths;
+}
+
+- (void)reloadBuffer {
+    [_dataSource loadPath:_currentPath];
+    [self updateStatusBar];
+}
+
 @end
 
 #pragma mark - App Delegate
@@ -485,6 +517,17 @@ typedef NS_ENUM(NSInteger, ListerState) {
     fileItem.submenu = fileMenu;
     [mainMenu addItem:fileItem];
 
+    /* Functions menu — matches DOpus F-key bindings */
+    NSMenuItem *funcItem = [[NSMenuItem alloc] init];
+    NSMenu *funcMenu = [[NSMenu alloc] initWithTitle:@"Functions"];
+    [self addFunctionItem:funcMenu title:@"Rename"  action:@selector(renameAction:)  fkey:NSF3FunctionKey];
+    [self addFunctionItem:funcMenu title:@"Copy"    action:@selector(copyAction:)    fkey:NSF5FunctionKey];
+    [self addFunctionItem:funcMenu title:@"Move"    action:@selector(moveAction:)    fkey:NSF6FunctionKey];
+    [self addFunctionItem:funcMenu title:@"MakeDir" action:@selector(makeDirAction:) fkey:NSF7FunctionKey];
+    [self addFunctionItem:funcMenu title:@"Delete"  action:@selector(deleteAction:)  fkey:NSF8FunctionKey];
+    funcItem.submenu = funcMenu;
+    [mainMenu addItem:funcItem];
+
     /* View menu */
     NSMenuItem *viewItem = [[NSMenuItem alloc] init];
     NSMenu *viewMenu = [[NSMenu alloc] initWithTitle:@"View"];
@@ -493,6 +536,12 @@ typedef NS_ENUM(NSInteger, ListerState) {
     [mainMenu addItem:viewItem];
 
     [NSApp setMainMenu:mainMenu];
+}
+
+- (void)addFunctionItem:(NSMenu *)menu title:(NSString *)title action:(SEL)action fkey:(unichar)fkey {
+    NSString *key = [NSString stringWithCharacters:&fkey length:1];
+    NSMenuItem *item = [menu addItemWithTitle:title action:action keyEquivalent:key];
+    item.keyEquivalentModifierMask = 0;  /* bare F-key, matching DOpus */
 }
 
 - (void)newListerAction:(id)sender {
@@ -584,6 +633,190 @@ typedef NS_ENUM(NSInteger, ListerState) {
     if (_activeSource == ctrl) _activeSource = nil;
     if (_activeDest == ctrl) _activeDest = nil;
     [_listerControllers removeObject:ctrl];
+}
+
+#pragma mark File operations (Functions menu)
+
+/* Refresh all listers displaying the given path (after copy/move/delete changes it) */
+- (void)refreshAllListersShowing:(NSString *)path {
+    for (ListerWindowController *lw in _listerControllers) {
+        if ([lw.currentPath isEqualToString:path]) [lw reloadBuffer];
+    }
+}
+
+/* Find the lister we should operate on. Prefer key window, else active source. */
+- (ListerWindowController *)operatingLister {
+    NSWindowController *wc = [NSApp keyWindow].windowController;
+    if ([wc isKindOfClass:[ListerWindowController class]]) {
+        return (ListerWindowController *)wc;
+    }
+    return _activeSource;
+}
+
+- (void)showAlert:(NSString *)title info:(NSString *)info style:(NSAlertStyle)style {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = title;
+    alert.informativeText = info ?: @"";
+    alert.alertStyle = style;
+    [alert runModal];
+}
+
+- (void)deleteAction:(id)sender {
+    ListerWindowController *src = [self operatingLister];
+    if (!src) return;
+    NSArray<NSString *> *paths = [src selectedPaths];
+    if (paths.count == 0) {
+        [self showAlert:@"Delete" info:@"No items selected." style:NSAlertStyleInformational];
+        return;
+    }
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = [NSString stringWithFormat:@"Move %lu item%@ to Trash?",
+                         (unsigned long)paths.count, paths.count == 1 ? @"" : @"s"];
+    NSArray<NSString *> *names = [src selectedNames];
+    NSMutableArray *preview = [NSMutableArray array];
+    for (NSUInteger i = 0; i < MIN(5u, names.count); i++) [preview addObject:names[i]];
+    if (names.count > 5) [preview addObject:[NSString stringWithFormat:@"… and %lu more", (unsigned long)(names.count - 5)]];
+    alert.informativeText = [preview componentsJoinedByString:@"\n"];
+    alert.alertStyle = NSAlertStyleWarning;
+    [alert addButtonWithTitle:@"Move to Trash"];
+    [alert addButtonWithTitle:@"Cancel"];
+
+    if ([alert runModal] != NSAlertFirstButtonReturn) return;
+
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSMutableArray<NSString *> *failed = [NSMutableArray array];
+    for (NSString *p in paths) {
+        NSError *err = nil;
+        if (![fm trashItemAtURL:[NSURL fileURLWithPath:p] resultingItemURL:nil error:&err]) {
+            [failed addObject:[NSString stringWithFormat:@"%@: %@", p.lastPathComponent, err.localizedDescription]];
+        }
+    }
+    [self refreshAllListersShowing:src.currentPath];
+    if (failed.count > 0) {
+        [self showAlert:@"Some items could not be deleted"
+                   info:[failed componentsJoinedByString:@"\n"]
+                  style:NSAlertStyleWarning];
+    }
+}
+
+- (void)makeDirAction:(id)sender {
+    ListerWindowController *src = [self operatingLister];
+    if (!src) return;
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Make Directory";
+    alert.informativeText = [NSString stringWithFormat:@"In: %@", src.currentPath];
+    NSTextField *input = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 300, 24)];
+    input.stringValue = @"";
+    alert.accessoryView = input;
+    [alert addButtonWithTitle:@"Create"];
+    [alert addButtonWithTitle:@"Cancel"];
+    [alert.window setInitialFirstResponder:input];
+
+    if ([alert runModal] != NSAlertFirstButtonReturn) return;
+    NSString *name = [input.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    if (name.length == 0) return;
+
+    NSString *newPath = [src.currentPath stringByAppendingPathComponent:name];
+    NSError *err = nil;
+    if (![[NSFileManager defaultManager] createDirectoryAtPath:newPath
+                                   withIntermediateDirectories:NO
+                                                    attributes:nil
+                                                         error:&err]) {
+        [self showAlert:@"MakeDir failed" info:err.localizedDescription style:NSAlertStyleWarning];
+        return;
+    }
+    [self refreshAllListersShowing:src.currentPath];
+}
+
+- (void)renameAction:(id)sender {
+    ListerWindowController *src = [self operatingLister];
+    if (!src) return;
+    NSArray<NSString *> *names = [src selectedNames];
+    if (names.count != 1) {
+        [self showAlert:@"Rename" info:@"Select exactly one item to rename." style:NSAlertStyleInformational];
+        return;
+    }
+    NSString *oldName = names.firstObject;
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Rename";
+    alert.informativeText = [NSString stringWithFormat:@"In: %@", src.currentPath];
+    NSTextField *input = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 300, 24)];
+    input.stringValue = oldName;
+    alert.accessoryView = input;
+    [alert addButtonWithTitle:@"Rename"];
+    [alert addButtonWithTitle:@"Cancel"];
+    [alert.window setInitialFirstResponder:input];
+    [input selectText:nil];
+
+    if ([alert runModal] != NSAlertFirstButtonReturn) return;
+    NSString *newName = [input.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    if (newName.length == 0 || [newName isEqualToString:oldName]) return;
+
+    NSString *oldPath = [src.currentPath stringByAppendingPathComponent:oldName];
+    NSString *newPath = [src.currentPath stringByAppendingPathComponent:newName];
+    NSError *err = nil;
+    if (![[NSFileManager defaultManager] moveItemAtPath:oldPath toPath:newPath error:&err]) {
+        [self showAlert:@"Rename failed" info:err.localizedDescription style:NSAlertStyleWarning];
+        return;
+    }
+    [self refreshAllListersShowing:src.currentPath];
+}
+
+- (void)copyAction:(id)sender { [self copyOrMove:NO]; }
+- (void)moveAction:(id)sender { [self copyOrMove:YES]; }
+
+- (void)copyOrMove:(BOOL)isMove {
+    ListerWindowController *src = _activeSource;
+    ListerWindowController *dst = _activeDest;
+    if (!src || !dst) {
+        [self showAlert:isMove ? @"Move" : @"Copy"
+                   info:@"Need both a SOURCE and DEST Lister. Open a second Lister (⌘N) or use Split Display (⇧⌘N)."
+                  style:NSAlertStyleInformational];
+        return;
+    }
+    if ([src.currentPath isEqualToString:dst.currentPath]) {
+        [self showAlert:isMove ? @"Move" : @"Copy"
+                   info:@"Source and destination are the same directory."
+                  style:NSAlertStyleInformational];
+        return;
+    }
+    NSArray<NSString *> *paths = [src selectedPaths];
+    NSArray<NSString *> *names = [src selectedNames];
+    if (paths.count == 0) {
+        [self showAlert:isMove ? @"Move" : @"Copy"
+                   info:@"No items selected in source lister."
+                  style:NSAlertStyleInformational];
+        return;
+    }
+
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSMutableArray<NSString *> *failed = [NSMutableArray array];
+    for (NSUInteger i = 0; i < paths.count; i++) {
+        NSString *from = paths[i];
+        NSString *to = [dst.currentPath stringByAppendingPathComponent:names[i]];
+        NSError *err = nil;
+        BOOL ok;
+        if (isMove) {
+            ok = [fm moveItemAtPath:from toPath:to error:&err];
+        } else {
+            ok = [fm copyItemAtPath:from toPath:to error:&err];
+        }
+        if (!ok) {
+            [failed addObject:[NSString stringWithFormat:@"%@: %@", names[i], err.localizedDescription]];
+        }
+    }
+
+    [self refreshAllListersShowing:dst.currentPath];
+    if (isMove) [self refreshAllListersShowing:src.currentPath];
+
+    if (failed.count > 0) {
+        [self showAlert:isMove ? @"Some items could not be moved" : @"Some items could not be copied"
+                   info:[failed componentsJoinedByString:@"\n"]
+                  style:NSAlertStyleWarning];
+    }
 }
 
 @end
