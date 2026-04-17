@@ -120,6 +120,8 @@ if(NOT APPLE)
                 src/gui/qt/ListerWidget.h
                 src/gui/qt/DirBufferModel.cpp
                 src/gui/qt/DirBufferModel.h
+                src/gui/qt/ButtonBank.cpp
+                src/gui/qt/ButtonBank.h
             )
             set_target_properties(idopus-qt PROPERTIES
                 AUTOMOC ON

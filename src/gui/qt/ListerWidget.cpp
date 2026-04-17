@@ -146,6 +146,7 @@ QPushButton *ListerWidget::makeButton(const QString &text, bool enabled) {
     QFont f = b->font();
     f.setPointSizeF(f.pointSizeF() * 0.9);
     b->setFont(f);
+    b->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Fixed);
     return b;
 }
 

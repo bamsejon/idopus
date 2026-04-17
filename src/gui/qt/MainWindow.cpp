@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 #include "ListerWidget.h"
+#include "ButtonBank.h"
 
 #include <QApplication>
 #include <QSplitter>
@@ -9,13 +10,23 @@ MainWindow::MainWindow(const QString &leftPath, const QString &rightPath,
     : QMainWindow(parent) {
     m_left  = new ListerWidget(leftPath,  this);
     m_right = new ListerWidget(rightPath, this);
+    m_bank  = new ButtonBank(this);
 
     auto *splitter = new QSplitter(Qt::Horizontal, this);
     splitter->addWidget(m_left);
+    splitter->addWidget(m_bank);
     splitter->addWidget(m_right);
     splitter->setChildrenCollapsible(false);
-    splitter->setSizes({1, 1});
+    splitter->setStretchFactor(0, 1);
+    splitter->setStretchFactor(1, 0);
+    splitter->setStretchFactor(2, 1);
     setCentralWidget(splitter);
+
+    connect(m_bank, &ButtonBank::parentClicked,  this, [this]{ if (m_active) m_active->goParent();   });
+    connect(m_bank, &ButtonBank::rootClicked,    this, [this]{ if (m_active) m_active->goRoot();     });
+    connect(m_bank, &ButtonBank::refreshClicked, this, [this]{ if (m_active) m_active->refresh();    });
+    connect(m_bank, &ButtonBank::allClicked,     this, [this]{ if (m_active) m_active->selectAll();  });
+    connect(m_bank, &ButtonBank::noneClicked,    this, [this]{ if (m_active) m_active->selectNone(); });
 
     connect(m_left,  &ListerWidget::pathChanged, this, [this](const QString&) { updateTitle(); });
     connect(m_right, &ListerWidget::pathChanged, this, [this](const QString&) { updateTitle(); });

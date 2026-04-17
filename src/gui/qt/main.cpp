@@ -12,7 +12,7 @@ int main(int argc, char **argv) {
         QStandardPaths::writableLocation(QStandardPaths::HomeLocation);
 
     MainWindow w(home, home);
-    w.resize(1400, 700);
+    w.resize(QSize(1400, 700).expandedTo(w.minimumSizeHint()));
     w.show();
     return app.exec();
 }

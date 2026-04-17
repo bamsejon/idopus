@@ -3,6 +3,7 @@
 #include <QMainWindow>
 
 class ListerWidget;
+class ButtonBank;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -20,4 +21,5 @@ private:
     ListerWidget *m_left   = nullptr;
     ListerWidget *m_right  = nullptr;
     ListerWidget *m_active = nullptr;
+    ButtonBank   *m_bank   = nullptr;
 };
