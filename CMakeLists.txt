@@ -47,9 +47,11 @@ if(APPLE)
         pthread
     )
     set_target_properties(idopus PROPERTIES
+        OUTPUT_NAME "iDOpus"
         MACOSX_BUNDLE_GUI_IDENTIFIER "se.bamsejon.idopus"
         MACOSX_BUNDLE_BUNDLE_NAME "iDOpus"
         MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
         MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
+        MACOSX_BUNDLE_COPYRIGHT "Copyright 2026 Jon Bylund. Original (c) GP Software / Jonathan Potter."
     )
 endif()

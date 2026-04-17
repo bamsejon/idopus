@@ -6,7 +6,19 @@ iDOpus is a project to bring the classic dual-pane file manager experience from 
 
 ## Status
 
-**Early stage** — porting in progress. The Amiga-specific code (Intuition GUI, AmigaDOS, BOOPSI classes, 68K assembler fragments) needs to be replaced with macOS equivalents (AppKit/SwiftUI, POSIX/Foundation, Cocoa).
+**Early preview.** A working AppKit Lister window (directory listing, sorting, navigation) with source/destination semantics and Split Display, matching the original Amiga model. File operations, toolbar, and configuration are not yet implemented.
+
+## Download & install (macOS, Apple Silicon)
+
+1. Grab the latest `.dmg` from [**Releases**](https://github.com/bamsejon/idopus/releases/latest).
+2. Open the `.dmg` and drag **iDOpus.app** to **Applications**.
+3. First launch: because the app is not code-signed, macOS will refuse to open it with a "unidentified developer" warning. **Right-click** iDOpus in Applications and choose **Open** — confirm once, and the app will open normally every time after that.
+   Alternatively, from a terminal:
+   ```
+   xattr -dr com.apple.quarantine /Applications/iDOpus.app
+   ```
+
+Requires macOS 13 (Ventura) or later on Apple Silicon (M1/M2/M3/M4).
 
 ## Background
 
@@ -36,9 +48,21 @@ The source code is derived from [Directory Opus 5.82 Magellan](https://github.co
 | 68K assembler fragments | Removed / rewritten in C or Swift |
 | SAS/C 6 compiler | Clang / Xcode |
 
-## Building
+## Building from source
 
-*Not yet buildable.* Porting work has not started. Watch this repo for progress.
+Requires Xcode Command Line Tools and CMake (3.20+).
+
+```
+cmake -S . -B build
+cmake --build build
+open build/iDOpus.app
+```
+
+To produce a distributable `.dmg` in `dist/`:
+
+```
+./scripts/package.sh
+```
 
 ## License
 

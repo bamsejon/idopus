@@ -1,9 +1,12 @@
 # Build
 build/
+build-release/
+dist/
 *.o
 *.d
 *.dylib
 *.app
+*.dmg
 DerivedData/
 xcuserdata/
 
