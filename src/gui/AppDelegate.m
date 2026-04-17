@@ -552,6 +552,8 @@ typedef NS_ENUM(NSInteger, ListerState) {
     _tableView.doubleAction = @selector(tableDoubleClick:);
     _tableView.target = self;
     _tableView.style = NSTableViewStyleFullWidth;
+    _tableView.autosaveName = @"iDOpus.ListerColumns";  /* shared across Listers */
+    _tableView.autosaveTableColumns = YES;
 
     /* Columns */
     struct { NSString *ident; NSString *title; CGFloat width; CGFloat min; } cols[] = {
