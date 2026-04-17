@@ -19,6 +19,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
 
 /* Forward declarations */
 @class ListerWindowController;
+@class ButtonBankPanelController;
 
 /* --- App Delegate --- */
 
@@ -27,6 +28,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
 @property (nonatomic, strong) NSMutableArray<ListerWindowController *> *listerControllers;
 @property (nonatomic, weak) ListerWindowController *activeSource;
 @property (nonatomic, weak) ListerWindowController *activeDest;
+@property (nonatomic, strong) ButtonBankPanelController *buttonBankPanel;
 @end
 
 @interface IDOpusAppDelegate ()
@@ -34,6 +36,14 @@ typedef NS_ENUM(NSInteger, ListerState) {
 - (ListerWindowController *)newListerWindow:(NSString *)path frame:(NSRect)frame;
 - (void)promoteToSource:(ListerWindowController *)ctrl;
 - (void)listerClosing:(ListerWindowController *)ctrl;
+
+/* Button Bank panel actions — operate on the active SOURCE lister */
+- (void)parentAction:(id)sender;
+- (void)rootAction:(id)sender;
+- (void)refreshAction:(id)sender;
+- (void)allAction:(id)sender;
+- (void)noneAction:(id)sender;
+- (void)toggleButtonBank:(id)sender;
 @end
 
 #pragma mark - Lister Table Data
@@ -533,6 +543,116 @@ typedef NS_ENUM(NSInteger, ListerState) {
 
 @end
 
+#pragma mark - Button Bank Panel
+
+/* Floating Magellan-style panel with a grid of action buttons, shared across
+ * all Listers. Non-activating: clicking a button does NOT steal key focus from
+ * the active source Lister, so source/dest semantics remain stable.
+ * Buttons route to IDOpusAppDelegate methods that operate on activeSource. */
+@interface ButtonBankPanelController : NSWindowController
+- (instancetype)initWithAppDelegate:(IDOpusAppDelegate *)appDelegate;
+- (void)positionBetweenListers;
+@end
+
+@implementation ButtonBankPanelController {
+    __weak IDOpusAppDelegate *_appDelegate;
+}
+
+- (instancetype)initWithAppDelegate:(IDOpusAppDelegate *)appDelegate {
+    NSRect frame = NSMakeRect(0, 0, 420, 76);
+    NSWindowStyleMask style = NSWindowStyleMaskTitled |
+                               NSWindowStyleMaskClosable |
+                               NSWindowStyleMaskUtilityWindow |
+                               NSWindowStyleMaskHUDWindow |
+                               NSWindowStyleMaskNonactivatingPanel;
+    NSPanel *panel = [[NSPanel alloc] initWithContentRect:frame
+                                                styleMask:style
+                                                  backing:NSBackingStoreBuffered
+                                                    defer:NO];
+    panel.title = @"Buttons";
+    panel.floatingPanel = YES;
+    panel.hidesOnDeactivate = NO;
+    panel.level = NSFloatingWindowLevel;
+    panel.becomesKeyOnlyIfNeeded = YES;
+
+    self = [super initWithWindow:panel];
+    if (!self) return nil;
+    _appDelegate = appDelegate;
+
+    [self buildGrid];
+    return self;
+}
+
+- (void)buildGrid {
+    NSView *content = self.window.contentView;
+
+    /* Two rows × five buttons each — DOpus Magellan defaults trimmed to what we support */
+    struct { NSString *title; SEL action; } row1[] = {
+        { @"Copy",    @selector(copyAction:) },
+        { @"Move",    @selector(moveAction:) },
+        { @"Delete",  @selector(deleteAction:) },
+        { @"Rename",  @selector(renameAction:) },
+        { @"MakeDir", @selector(makeDirAction:) },
+    };
+    struct { NSString *title; SEL action; } row2[] = {
+        { @"Parent",  @selector(parentAction:) },
+        { @"Root",    @selector(rootAction:) },
+        { @"Refresh", @selector(refreshAction:) },
+        { @"All",     @selector(allAction:) },
+        { @"None",    @selector(noneAction:) },
+    };
+
+    NSStackView *r1 = [self makeRow:row1 count:5];
+    NSStackView *r2 = [self makeRow:row2 count:5];
+
+    NSStackView *column = [[NSStackView alloc] init];
+    column.orientation = NSUserInterfaceLayoutOrientationVertical;
+    column.spacing = 4;
+    column.distribution = NSStackViewDistributionFillEqually;
+    column.translatesAutoresizingMaskIntoConstraints = NO;
+    [column addArrangedSubview:r1];
+    [column addArrangedSubview:r2];
+    [content addSubview:column];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [column.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:8],
+        [column.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-8],
+        [column.topAnchor constraintEqualToAnchor:content.topAnchor constant:6],
+        [column.bottomAnchor constraintEqualToAnchor:content.bottomAnchor constant:-6],
+    ]];
+}
+
+- (NSStackView *)makeRow:(void *)specsPtr count:(int)n {
+    struct Spec { NSString *title; SEL action; };
+    struct Spec *specs = (struct Spec *)specsPtr;
+
+    NSStackView *row = [[NSStackView alloc] init];
+    row.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    row.spacing = 4;
+    row.distribution = NSStackViewDistributionFillEqually;
+    for (int i = 0; i < n; i++) {
+        NSButton *b = [NSButton buttonWithTitle:specs[i].title
+                                         target:_appDelegate
+                                         action:specs[i].action];
+        b.bezelStyle = NSBezelStyleRounded;
+        b.controlSize = NSControlSizeSmall;
+        b.font = [NSFont systemFontOfSize:11];
+        [row addArrangedSubview:b];
+    }
+    return row;
+}
+
+- (void)positionBetweenListers {
+    /* Center the panel near the top of the screen, above the Listers. */
+    NSRect screen = [[NSScreen mainScreen] visibleFrame];
+    NSRect frame = self.window.frame;
+    frame.origin.x = screen.origin.x + (screen.size.width - frame.size.width) / 2;
+    frame.origin.y = screen.origin.y + screen.size.height - frame.size.height - 12;
+    [self.window setFrame:frame display:YES animate:NO];
+}
+
+@end
+
 #pragma mark - App Delegate
 
 @implementation IDOpusAppDelegate
@@ -560,6 +680,14 @@ typedef NS_ENUM(NSInteger, ListerState) {
     ListerWindowController *right = [self newListerWindow:NSHomeDirectory() frame:rightFrame];
     [left.window setFrame:leftFrame display:YES animate:NO];
     [right.window setFrame:rightFrame display:YES animate:NO];
+
+    /* Floating Button Bank panel — classic Magellan feature */
+    _buttonBankPanel = [[ButtonBankPanelController alloc] initWithAppDelegate:self];
+    [_buttonBankPanel positionBetweenListers];
+    [_buttonBankPanel.window orderFront:nil];
+
+    /* Keep the SOURCE Lister key after bringing up the panel */
+    [right.window makeKeyAndOrderFront:nil];
 }
 
 - (void)applicationWillTerminate:(NSNotification *)notification {
@@ -609,6 +737,8 @@ typedef NS_ENUM(NSInteger, ListerState) {
     NSMenuItem *viewItem = [[NSMenuItem alloc] init];
     NSMenu *viewMenu = [[NSMenu alloc] initWithTitle:@"View"];
     [viewMenu addItemWithTitle:@"Show Hidden Files" action:@selector(toggleHidden:) keyEquivalent:@"."];
+    [viewMenu addItem:[NSMenuItem separatorItem]];
+    [viewMenu addItemWithTitle:@"Show/Hide Buttons" action:@selector(toggleButtonBank:) keyEquivalent:@"b"];
     viewItem.submenu = viewMenu;
     [mainMenu addItem:viewItem];
 
@@ -710,6 +840,28 @@ typedef NS_ENUM(NSInteger, ListerState) {
     if (_activeSource == ctrl) _activeSource = nil;
     if (_activeDest == ctrl) _activeDest = nil;
     [_listerControllers removeObject:ctrl];
+}
+
+#pragma mark Unified Button Bank actions (operate on active SOURCE)
+
+/* Operations that target a single Lister — fall back to activeSource when
+ * invoked from the floating Button Bank panel (which is non-activating, so
+ * the source Lister keeps its SOURCE state while the user clicks the panel). */
+- (ListerWindowController *)sourceOrOperating {
+    return _activeSource ?: [self operatingLister];
+}
+
+- (void)parentAction:(id)sender  { [[self sourceOrOperating] goUp:sender]; }
+- (void)rootAction:(id)sender    { [[self sourceOrOperating] goRoot:sender]; }
+- (void)refreshAction:(id)sender { [[self sourceOrOperating] refresh:sender]; }
+- (void)allAction:(id)sender     { [[self sourceOrOperating] selectAllFiles:sender]; }
+- (void)noneAction:(id)sender    { [[self sourceOrOperating] deselectAllFiles:sender]; }
+
+- (void)toggleButtonBank:(id)sender {
+    if (!_buttonBankPanel) return;
+    NSWindow *w = _buttonBankPanel.window;
+    if (w.isVisible) [w orderOut:nil];
+    else             [w orderFront:nil];
 }
 
 #pragma mark File operations (Functions menu)
