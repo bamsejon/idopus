@@ -68,24 +68,69 @@ typedef NS_ENUM(NSInteger, ListerState) {
 
 #pragma mark - Lister Table View
 
-/* NSTableView subclass that forwards bare Space to the Quick Look action.
- * Without this, macOS consumes Space inside the table (no forwarding to the
- * menu), so View → Quick Look's bare-Space keyEquivalent never fires from
- * inside the table. */
+@protocol ListerTypeSearchDataSource <NSObject>
+- (NSInteger)rowForNamePrefix:(NSString *)prefix;
+@end
+
+/* NSTableView subclass with:
+ *   - bare Space forwarded to toggleQuickLook: (macOS consumes Space inside
+ *     the table otherwise, so View → Quick Look's bare-Space keyEquivalent
+ *     never fires from within the table).
+ *   - type-to-find: typing printable chars builds a prefix and jumps to the
+ *     first matching row. Prefix resets after 500 ms of no typing, or Esc. */
 @interface ListerTableView : NSTableView
+@property (nonatomic, copy) NSString *typeSearchBuffer;
+@property (nonatomic, assign) NSTimeInterval lastTypeTime;
 @end
 
 @implementation ListerTableView
+
 - (void)keyDown:(NSEvent *)event {
-    if (event.modifierFlags == 0 || (event.modifierFlags & NSEventModifierFlagDeviceIndependentFlagsMask) == 0) {
-        NSString *chars = event.charactersIgnoringModifiers;
-        if ([chars isEqualToString:@" "]) {
-            [NSApp sendAction:@selector(toggleQuickLook:) to:nil from:self];
+    NSUInteger mods = event.modifierFlags & NSEventModifierFlagDeviceIndependentFlagsMask;
+    NSString *chars = event.charactersIgnoringModifiers;
+
+    /* Bare Space → Quick Look */
+    if (mods == 0 && [chars isEqualToString:@" "]) {
+        [NSApp sendAction:@selector(toggleQuickLook:) to:nil from:self];
+        return;
+    }
+    /* Esc → clear type-to-find buffer */
+    if (chars.length == 1 && [chars characterAtIndex:0] == 0x1B) {
+        _typeSearchBuffer = nil;
+        [super keyDown:event];
+        return;
+    }
+
+    /* Type-to-find: single printable character, no Cmd/Ctrl */
+    BOOL hasCmdOrCtrl = (mods & (NSEventModifierFlagCommand | NSEventModifierFlagControl)) != 0;
+    if (!hasCmdOrCtrl && chars.length == 1) {
+        unichar c = [chars characterAtIndex:0];
+        if (c >= 0x20 && c < 0x7F) {
+            NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+            if (!_typeSearchBuffer || now - _lastTypeTime > 0.5) {
+                _typeSearchBuffer = [chars lowercaseString];
+            } else {
+                _typeSearchBuffer = [_typeSearchBuffer stringByAppendingString:[chars lowercaseString]];
+            }
+            _lastTypeTime = now;
+            [self selectByTypePrefix:_typeSearchBuffer];
             return;
         }
     }
+
     [super keyDown:event];
 }
+
+- (void)selectByTypePrefix:(NSString *)prefix {
+    if (prefix.length == 0) return;
+    id<ListerTypeSearchDataSource> ds = (id)self.dataSource;
+    if (![ds respondsToSelector:@selector(rowForNamePrefix:)]) return;
+    NSInteger row = [ds rowForNamePrefix:prefix];
+    if (row < 0) return;
+    [self selectRowIndexes:[NSIndexSet indexSetWithIndex:(NSUInteger)row] byExtendingSelection:NO];
+    [self scrollRowToVisible:row];
+}
+
 @end
 
 #pragma mark - Lister Window Controller (interface)
@@ -123,6 +168,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
 - (void)loadPath:(NSString *)path;
 - (void)sortByColumn:(NSString *)identifier;
 - (void)applyCurrentFilter;
+- (NSInteger)rowForNamePrefix:(NSString *)prefix;
 @end
 
 @implementation ListerDataSource
@@ -155,6 +201,19 @@ typedef NS_ENUM(NSInteger, ListerState) {
                           _hideDotfiles);
     dir_buffer_apply_filter(_buffer);
     [_tableView reloadData];
+}
+
+- (NSInteger)rowForNamePrefix:(NSString *)prefix {
+    if (!_buffer || prefix.length == 0) return -1;
+    const char *cpre = [prefix UTF8String];
+    size_t plen = strlen(cpre);
+    int total = _buffer->stats.total_entries;
+    for (int i = 0; i < total; i++) {
+        dir_entry_t *e = dir_buffer_get_entry(_buffer, i);
+        if (!e || !e->name) continue;
+        if (strncasecmp(e->name, cpre, plen) == 0) return i;
+    }
+    return -1;
 }
 
 - (void)sortByColumn:(NSString *)identifier {
