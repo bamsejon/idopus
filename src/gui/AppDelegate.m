@@ -30,6 +30,7 @@
 @interface ListerDataSource : NSObject <NSTableViewDataSource, NSTableViewDelegate>
 @property (nonatomic) dir_buffer_t *buffer;
 @property (nonatomic, assign) NSTableView *tableView;
+@property (nonatomic, copy) void (^onColumnClick)(NSString *identifier);
 - (void)loadPath:(NSString *)path;
 - (void)sortByColumn:(NSString *)identifier;
 @end
@@ -85,23 +86,8 @@
     if (!entry) return nil;
 
     NSString *identifier = tableColumn.identifier;
-    NSTableCellView *cell = [tableView makeViewWithIdentifier:identifier owner:self];
 
-    if (!cell) {
-        cell = [[NSTableCellView alloc] init];
-        cell.identifier = identifier;
-        NSTextField *tf = [NSTextField labelWithString:@""];
-        tf.font = [NSFont monospacedSystemFontOfSize:12 weight:NSFontWeightRegular];
-        tf.translatesAutoresizingMaskIntoConstraints = NO;
-        cell.textField = tf;
-        [cell addSubview:tf];
-        [NSLayoutConstraint activateConstraints:@[
-            [tf.leadingAnchor constraintEqualToAnchor:cell.leadingAnchor constant:4],
-            [tf.trailingAnchor constraintEqualToAnchor:cell.trailingAnchor constant:-4],
-            [tf.centerYAnchor constraintEqualToAnchor:cell.centerYAnchor],
-        ]];
-    }
-
+    /* Build cell text */
     NSString *text = @"";
 
     if ([identifier isEqualToString:@"name"]) {
@@ -109,7 +95,7 @@
         if (dir_entry_is_dir(entry))
             text = [NSString stringWithFormat:@"\U0001F4C1 %@", name];
         else
-            text = [NSString stringWithFormat:@"  %@", name];
+            text = [NSString stringWithFormat:@"   %@", name];
     }
     else if ([identifier isEqualToString:@"size"]) {
         if (dir_entry_is_dir(entry)) {
@@ -130,16 +116,33 @@
         text = ext ? [NSString stringWithUTF8String:ext] : @"";
     }
 
+    /* Build cell view with proper frame sizing */
+    NSTableCellView *cell = [tableView makeViewWithIdentifier:identifier owner:nil];
+    if (!cell) {
+        cell = [[NSTableCellView alloc] initWithFrame:NSMakeRect(0, 0, tableColumn.width, 20)];
+        cell.identifier = identifier;
+
+        NSTextField *tf = [[NSTextField alloc] initWithFrame:cell.bounds];
+        tf.bordered = NO;
+        tf.drawsBackground = NO;
+        tf.editable = NO;
+        tf.selectable = NO;
+        tf.font = [NSFont monospacedSystemFontOfSize:12 weight:NSFontWeightRegular];
+        tf.lineBreakMode = NSLineBreakByTruncatingTail;
+        tf.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+        cell.textField = tf;
+        [cell addSubview:tf];
+    }
+
     cell.textField.stringValue = text;
 
-    /* Selection highlighting */
-    if (dir_entry_is_selected(entry)) {
+    /* Colour */
+    if (dir_entry_is_selected(entry))
         cell.textField.textColor = [NSColor systemYellowColor];
-    } else if (dir_entry_is_dir(entry)) {
+    else if (dir_entry_is_dir(entry))
         cell.textField.textColor = [NSColor systemCyanColor];
-    } else {
+    else
         cell.textField.textColor = [NSColor labelColor];
-    }
 
     return cell;
 }
@@ -148,11 +151,16 @@
     return 20.0;
 }
 
+- (void)tableView:(NSTableView *)tableView didClickTableColumn:(NSTableColumn *)tableColumn {
+    [self sortByColumn:tableColumn.identifier];
+    if (_onColumnClick) _onColumnClick(tableColumn.identifier);
+}
+
 @end
 
 #pragma mark - Lister Window Controller
 
-@interface ListerWindowController : NSWindowController <NSTableViewDelegate>
+@interface ListerWindowController : NSWindowController
 @property (nonatomic, strong) ListerDataSource *dataSource;
 @property (nonatomic, strong) NSTableView *tableView;
 @property (nonatomic, strong) NSTextField *pathField;
@@ -280,8 +288,11 @@
         [_statusBar.heightAnchor constraintEqualToConstant:18],
     ]];
 
-    /* Sort by clicking column headers */
-    _tableView.delegate = (id<NSTableViewDelegate>)self;
+    /* Column click callback to update status bar */
+    __weak typeof(self) weakSelf = self;
+    _dataSource.onColumnClick = ^(NSString *ident) {
+        [weakSelf updateStatusBar];
+    };
 }
 
 - (void)loadPath:(NSString *)path {
@@ -341,13 +352,6 @@
         [[NSWorkspace sharedWorkspace] openURL:
             [NSURL fileURLWithPath:[NSString stringWithUTF8String:fullpath]]];
     }
-}
-
-#pragma mark NSTableViewDelegate (column click sorting)
-
-- (void)tableView:(NSTableView *)tableView didClickTableColumn:(NSTableColumn *)tableColumn {
-    [_dataSource sortByColumn:tableColumn.identifier];
-    [self updateStatusBar];
 }
 
 @end
