@@ -32,6 +32,12 @@ typedef NS_ENUM(NSInteger, ListerState) {
 @property (nonatomic, weak) ListerWindowController *activeSource;
 @property (nonatomic, weak) ListerWindowController *activeDest;
 @property (nonatomic, strong) ButtonBankPanelController *buttonBankPanel;
+
+- (void)refreshAllListersShowing:(NSString *)path;
+- (void)showAlert:(NSString *)title info:(NSString *)info style:(NSAlertStyle)style;
+- (void)performDropOntoLister:(ListerWindowController *)dest
+                     fromURLs:(NSArray<NSURL *> *)urls
+                       asMove:(BOOL)isMove;
 @end
 
 @interface IDOpusAppDelegate ()
@@ -54,6 +60,29 @@ typedef NS_ENUM(NSInteger, ListerState) {
 
 #pragma mark - Lister Table Data
 
+#pragma mark - Lister Window Controller (interface)
+
+@class ListerDataSource;
+
+@interface ListerWindowController : NSWindowController <NSWindowDelegate>
+@property (nonatomic, strong) ListerDataSource *dataSource;
+@property (nonatomic, strong) NSTableView *tableView;
+@property (nonatomic, strong) NSTextField *pathField;
+@property (nonatomic, strong) NSTextField *stateLabel;  /* SOURCE/DEST/OFF */
+@property (nonatomic, strong) NSTextField *statusBar;   /* file/dir counts */
+@property (nonatomic, strong) NSStackView *buttonBank;
+@property (nonatomic, copy) NSString *currentPath;
+@property (nonatomic, assign) ListerState state;
+@property (nonatomic, weak) IDOpusAppDelegate *appDelegate;
+- (void)setState:(ListerState)state;
+- (NSArray<NSString *> *)selectedPaths;
+- (NSArray<NSString *> *)selectedNames;
+- (void)reloadBuffer;
+- (void)updateStatusBar;
+@end
+
+#pragma mark - Lister Table Data
+
 /* Wraps a dir_buffer_t for NSTableView display */
 @interface ListerDataSource : NSObject <NSTableViewDataSource, NSTableViewDelegate>
 @property (nonatomic) dir_buffer_t *buffer;
@@ -62,6 +91,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
 @property (nonatomic, copy) NSString *showPattern;   /* nil = show all */
 @property (nonatomic, copy) NSString *hidePattern;   /* nil = hide none */
 @property (nonatomic, assign) BOOL hideDotfiles;     /* default YES */
+@property (nonatomic, weak) ListerWindowController *owner;  /* for drag-drop access */
 - (void)loadPath:(NSString *)path;
 - (void)sortByColumn:(NSString *)identifier;
 - (void)applyCurrentFilter;
@@ -200,26 +230,56 @@ typedef NS_ENUM(NSInteger, ListerState) {
     if (_onColumnClick) _onColumnClick(tableColumn.identifier);
 }
 
+#pragma mark Drag-and-drop
+
+/* Drag out: each row writes an NSURL for its file, so macOS and other apps
+ * (Finder, Trash) can consume the drag naturally. */
+- (id<NSPasteboardWriting>)tableView:(NSTableView *)tableView
+             pasteboardWriterForRow:(NSInteger)row {
+    dir_entry_t *e = dir_buffer_get_entry(_buffer, (int)row);
+    if (!e || !e->name || !_owner) return nil;
+    char full[4096];
+    pal_path_join([_owner.currentPath fileSystemRepresentation],
+                  e->name, full, sizeof(full));
+    return [NSURL fileURLWithPath:[NSString stringWithUTF8String:full]];
+}
+
+/* Drop onto the table: always "drop on table" (not between rows) = drop into
+ * this Lister's currentPath. Default = copy; Option held = move. */
+- (NSDragOperation)tableView:(NSTableView *)tableView
+                validateDrop:(id<NSDraggingInfo>)info
+                 proposedRow:(NSInteger)row
+       proposedDropOperation:(NSTableViewDropOperation)op {
+    [tableView setDropRow:-1 dropOperation:NSTableViewDropOn];  /* always the whole table */
+
+    /* Refuse drops from the same Lister (source == dest path). */
+    NSArray<NSURL *> *urls = [info.draggingPasteboard readObjectsForClasses:@[NSURL.class] options:nil];
+    if (urls.count == 0) return NSDragOperationNone;
+    NSString *firstParent = [urls.firstObject.path stringByDeletingLastPathComponent];
+    if (_owner && [firstParent isEqualToString:_owner.currentPath]) {
+        return NSDragOperationNone;
+    }
+
+    BOOL option = (info.draggingSourceOperationMask & NSDragOperationMove) &&
+                  ([NSEvent modifierFlags] & NSEventModifierFlagOption);
+    return option ? NSDragOperationMove : NSDragOperationCopy;
+}
+
+- (BOOL)tableView:(NSTableView *)tableView
+       acceptDrop:(id<NSDraggingInfo>)info
+              row:(NSInteger)row
+    dropOperation:(NSTableViewDropOperation)op {
+    if (!_owner) return NO;
+    NSArray<NSURL *> *urls = [info.draggingPasteboard readObjectsForClasses:@[NSURL.class] options:nil];
+    if (urls.count == 0) return NO;
+    BOOL isMove = ([NSEvent modifierFlags] & NSEventModifierFlagOption) != 0;
+    [_owner.appDelegate performDropOntoLister:_owner fromURLs:urls asMove:isMove];
+    return YES;
+}
+
 @end
 
 #pragma mark - Lister Window Controller
-
-@interface ListerWindowController : NSWindowController <NSWindowDelegate>
-@property (nonatomic, strong) ListerDataSource *dataSource;
-@property (nonatomic, strong) NSTableView *tableView;
-@property (nonatomic, strong) NSTextField *pathField;
-@property (nonatomic, strong) NSTextField *stateLabel;  /* SOURCE/DEST/OFF */
-@property (nonatomic, strong) NSTextField *statusBar;   /* file/dir counts */
-@property (nonatomic, strong) NSStackView *buttonBank;
-@property (nonatomic, copy) NSString *currentPath;
-@property (nonatomic, assign) ListerState state;
-@property (nonatomic, weak) IDOpusAppDelegate *appDelegate;
-- (void)setState:(ListerState)state;
-- (NSArray<NSString *> *)selectedPaths;
-- (NSArray<NSString *> *)selectedNames;
-- (void)reloadBuffer;
-- (void)updateStatusBar;
-@end
 
 @implementation ListerWindowController
 
@@ -308,6 +368,14 @@ typedef NS_ENUM(NSInteger, ListerState) {
     _tableView.dataSource = _dataSource;
     _tableView.delegate = _dataSource;
     _dataSource.tableView = _tableView;
+    _dataSource.owner = self;
+
+    /* Drag-and-drop — accept file URLs from anywhere (other Listers or Finder) */
+    [_tableView registerForDraggedTypes:@[NSPasteboardTypeFileURL]];
+    [_tableView setDraggingSourceOperationMask:NSDragOperationCopy | NSDragOperationMove
+                                     forLocal:YES];
+    [_tableView setDraggingSourceOperationMask:NSDragOperationCopy
+                                     forLocal:NO];
 
     scrollView.documentView = _tableView;
     [content addSubview:scrollView];
@@ -1313,6 +1381,44 @@ typedef NS_ENUM(NSInteger, ListerState) {
 
 - (void)copyAction:(id)sender { [self copyOrMove:NO]; }
 - (void)moveAction:(id)sender { [self copyOrMove:YES]; }
+
+/* Drag-and-drop entry point: files dragged from somewhere (another Lister
+ * or an external app like Finder) dropped onto `dest`. */
+- (void)performDropOntoLister:(ListerWindowController *)dest
+                     fromURLs:(NSArray<NSURL *> *)urls
+                       asMove:(BOOL)isMove {
+    if (!dest || urls.count == 0) return;
+
+    NSMutableArray<NSString *> *paths = [NSMutableArray arrayWithCapacity:urls.count];
+    NSMutableArray<NSString *> *names = [NSMutableArray arrayWithCapacity:urls.count];
+    for (NSURL *u in urls) {
+        [paths addObject:u.path];
+        [names addObject:u.lastPathComponent];
+    }
+    NSString *destDir = dest.currentPath;
+    NSString *sourceParent = [urls.firstObject.path stringByDeletingLastPathComponent];
+
+    __weak typeof(self) weakSelf = self;
+    ProgressSheetController *sheet = [[ProgressSheetController alloc] init];
+    __block ProgressSheetController *keepAlive = sheet;
+    [sheet runOperation:isMove
+                  paths:paths
+                  names:names
+                destDir:destDir
+           sourceWindow:dest.window
+             completion:^(NSArray<NSString *> *failed) {
+        typeof(self) s = weakSelf;
+        if (!s) { keepAlive = nil; return; }
+        [s refreshAllListersShowing:destDir];
+        if (isMove) [s refreshAllListersShowing:sourceParent];
+        if (failed.count > 0) {
+            [s showAlert:isMove ? @"Some items could not be moved" : @"Some items could not be copied"
+                    info:[failed componentsJoinedByString:@"\n"]
+                   style:NSAlertStyleWarning];
+        }
+        keepAlive = nil;
+    }];
+}
 
 - (void)copyOrMove:(BOOL)isMove {
     ListerWindowController *src = _activeSource;
