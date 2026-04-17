@@ -1879,18 +1879,25 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     _titleLabel.stringValue = @"Cancelling…";
 }
 
-/* Returns: 1=Replace, 2=Skip, 3=Keep Both, 4=Cancel-all.
+/* Returns: 1=Replace, 2=Skip, 3=Keep Both, 4=Cancel-all, 5=Merge.
+ * Merge is only offered when both source and destination are directories.
  * If the "Apply to all remaining" checkbox is on, writes the choice into
  * applyAll so subsequent conflicts use it without prompting. */
-- (int)askReplaceSkipKeepBothFor:(NSString *)name applyAll:(int *)applyAll {
+- (int)askReplaceSkipKeepBothFor:(NSString *)name
+                           isDir:(BOOL)bothAreDirs
+                        applyAll:(int *)applyAll {
     NSAlert *alert = [[NSAlert alloc] init];
     alert.messageText = [NSString stringWithFormat:@"\"%@\" already exists", name];
-    alert.informativeText = @"Choose how to handle this conflict.";
+    alert.informativeText = bothAreDirs
+        ? @"Both are folders. Merge = add source's contents into the existing folder (won't overwrite anything there)."
+        : @"Choose how to handle this conflict.";
     alert.alertStyle = NSAlertStyleWarning;
+
     [alert addButtonWithTitle:@"Replace"];
     [alert addButtonWithTitle:@"Skip"];
     [alert addButtonWithTitle:@"Keep Both"];
     [alert addButtonWithTitle:@"Cancel All"];
+    if (bothAreDirs) [alert addButtonWithTitle:@"Merge"];
 
     NSButton *applyToAll = [NSButton checkboxWithTitle:@"Apply to all remaining conflicts"
                                                 target:nil action:nil];
@@ -1903,11 +1910,59 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     else if (r == NSAlertSecondButtonReturn)       choice = 2;  /* Skip */
     else if (r == NSAlertThirdButtonReturn)        choice = 3;  /* Keep Both */
     else if (r == NSAlertThirdButtonReturn + 1)    choice = 4;  /* Cancel All */
+    else if (r == NSAlertThirdButtonReturn + 2)    choice = 5;  /* Merge */
 
     if (applyToAll.state == NSControlStateValueOn && choice != 4) {
         *applyAll = choice;
     }
     return choice;
+}
+
+/* Non-destructive merge: walk source dir recursively and copy/move each
+ * item into dest dir, skipping items that already exist at dest. Leaves
+ * the user's existing files alone — good for "fill missing stuff in". */
+- (BOOL)mergeSource:(NSString *)src
+          intoDest:(NSString *)dst
+            isMove:(BOOL)isMove
+         fileManager:(NSFileManager *)fm
+             failed:(NSMutableArray<NSString *> *)failed {
+    NSError *err = nil;
+    NSArray<NSString *> *children = [fm contentsOfDirectoryAtPath:src error:&err];
+    if (!children) {
+        [failed addObject:[NSString stringWithFormat:@"%@: %@",
+                           src.lastPathComponent, err.localizedDescription]];
+        return NO;
+    }
+    BOOL allOK = YES;
+    for (NSString *child in children) {
+        if (self.cancelled) return NO;
+        NSString *fromChild = [src stringByAppendingPathComponent:child];
+        NSString *toChild   = [dst stringByAppendingPathComponent:child];
+
+        BOOL toExists = [fm fileExistsAtPath:toChild];
+        BOOL fromIsDir = NO, toIsDir = NO;
+        [fm fileExistsAtPath:fromChild isDirectory:&fromIsDir];
+        if (toExists) [fm fileExistsAtPath:toChild isDirectory:&toIsDir];
+
+        if (!toExists) {
+            NSError *e = nil;
+            BOOL ok = isMove
+                ? [fm moveItemAtPath:fromChild toPath:toChild error:&e]
+                : [fm copyItemAtPath:fromChild toPath:toChild error:&e];
+            if (!ok) { [failed addObject:[NSString stringWithFormat:@"%@: %@", child, e.localizedDescription]]; allOK = NO; }
+        } else if (fromIsDir && toIsDir) {
+            /* recurse */
+            BOOL rec = [self mergeSource:fromChild intoDest:toChild isMove:isMove fileManager:fm failed:failed];
+            if (!rec) allOK = NO;
+        }
+        /* else: conflict on a file → skip (non-destructive merge) */
+    }
+    /* For move, if source is now empty we can remove it. */
+    if (isMove && allOK && !self.cancelled) {
+        NSArray *remain = [fm contentsOfDirectoryAtPath:src error:nil];
+        if (remain.count == 0) [fm removeItemAtPath:src error:nil];
+    }
+    return allOK;
 }
 
 - (void)runOperation:(BOOL)isMove
@@ -1947,14 +2002,30 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
 
             /* Conflict: target already exists → ask unless apply-all is set */
             if ([fm fileExistsAtPath:to]) {
+                BOOL fromIsDir = NO, toIsDir = NO;
+                [fm fileExistsAtPath:from isDirectory:&fromIsDir];
+                [fm fileExistsAtPath:to   isDirectory:&toIsDir];
+                BOOL bothDirs = fromIsDir && toIsDir;
+
                 __block int choice = applyAll;
-                if (choice == 0) {
+                if (choice == 0 || (choice == 5 && !bothDirs)) {
+                    /* Re-prompt if the saved apply-all is Merge but this pair
+                     * isn't dir-on-dir (Merge not applicable). */
                     dispatch_sync(dispatch_get_main_queue(), ^{
-                        choice = [self askReplaceSkipKeepBothFor:name applyAll:&applyAll];
+                        choice = [self askReplaceSkipKeepBothFor:name
+                                                           isDir:bothDirs
+                                                        applyAll:&applyAll];
                     });
                 }
                 if (choice == 2) continue;   /* skip */
                 if (choice == 4) { self.cancelled = YES; break; }  /* cancel all */
+                if (choice == 5 && bothDirs) {
+                    /* Merge dir-on-dir recursively. Loop's copy/move at the
+                     * bottom is skipped for this iteration. */
+                    [self mergeSource:from intoDest:to isMove:isMove
+                          fileManager:fm failed:failed];
+                    continue;
+                }
                 if (choice == 3) {
                     /* Keep both: resolve to a unique name */
                     NSString *base = [name stringByDeletingPathExtension];
