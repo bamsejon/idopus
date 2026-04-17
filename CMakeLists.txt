@@ -38,5 +38,18 @@ target_link_libraries(pal_test PRIVATE pal)
 add_executable(core_test tests/core_test.c)
 target_link_libraries(core_test PRIVATE core pal)
 
-# Future: GUI app
-# add_executable(idopus src/gui/...)
+# --- GUI app (macOS only) ---
+if(APPLE)
+    add_executable(idopus MACOSX_BUNDLE src/gui/AppDelegate.m)
+    target_compile_options(idopus PRIVATE "-fobjc-arc")
+    target_link_libraries(idopus PRIVATE core pal
+        "-framework Cocoa"
+        pthread
+    )
+    set_target_properties(idopus PROPERTIES
+        MACOSX_BUNDLE_GUI_IDENTIFIER "se.bamsejon.idopus"
+        MACOSX_BUNDLE_BUNDLE_NAME "iDOpus"
+        MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
+        MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
+    )
+endif()
