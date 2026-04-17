@@ -5,6 +5,9 @@
  */
 
 #import <Cocoa/Cocoa.h>
+#include <sys/stat.h>
+#include <pwd.h>
+#include <grp.h>
 #include "core/dir_buffer.h"
 #include "pal/pal_strings.h"
 #include "pal/pal_file.h"
@@ -43,6 +46,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
 - (void)refreshAction:(id)sender;
 - (void)allAction:(id)sender;
 - (void)noneAction:(id)sender;
+- (void)infoAction:(id)sender;
 - (void)toggleButtonBank:(id)sender;
 @end
 
@@ -302,6 +306,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
         { @"Delete",  @selector(deleteAction:),  _appDelegate },
         { @"Rename",  @selector(renameAction:),  _appDelegate },
         { @"MakeDir", @selector(makeDirAction:), _appDelegate },
+        { @"Info",    @selector(infoAction:),    _appDelegate },
         { @"",        NULL, nil },  /* separator */
         { @"Parent",  @selector(goUp:),          self },
         { @"Root",    @selector(goRoot:),        self },
@@ -724,6 +729,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
         { @"Delete",  @selector(deleteAction:)  },
         { @"Rename",  @selector(renameAction:)  },
         { @"MakeDir", @selector(makeDirAction:) },
+        { @"Info",    @selector(infoAction:)    },
         { @"Parent",  @selector(parentAction:)  },
         { @"Root",    @selector(rootAction:)    },
         { @"Refresh", @selector(refreshAction:) },
@@ -864,6 +870,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
     [self addFunctionItem:funcMenu title:@"Move"    action:@selector(moveAction:)    fkey:NSF6FunctionKey];
     [self addFunctionItem:funcMenu title:@"MakeDir" action:@selector(makeDirAction:) fkey:NSF7FunctionKey];
     [self addFunctionItem:funcMenu title:@"Delete"  action:@selector(deleteAction:)  fkey:NSF8FunctionKey];
+    [self addFunctionItem:funcMenu title:@"Info"    action:@selector(infoAction:)    fkey:NSF9FunctionKey];
     funcItem.submenu = funcMenu;
     [mainMenu addItem:funcItem];
 
@@ -996,6 +1003,95 @@ typedef NS_ENUM(NSInteger, ListerState) {
     NSWindow *w = _buttonBankPanel.window;
     if (w.isVisible) [w orderOut:nil];
     else             [w orderFront:nil];
+}
+
+/* Info — DOpus "Read Info". Single selection: show all properties.
+ * Multi-selection: show aggregate count and total size. */
+- (void)infoAction:(id)sender {
+    ListerWindowController *src = [self operatingLister];
+    if (!src) return;
+    NSArray<NSString *> *paths = [src selectedPaths];
+    NSArray<NSString *> *names = [src selectedNames];
+    if (paths.count == 0) {
+        [self showAlert:@"Info" info:@"No items selected." style:NSAlertStyleInformational];
+        return;
+    }
+
+    NSAlert *alert = [[NSAlert alloc] init];
+
+    if (paths.count == 1) {
+        alert.messageText = [NSString stringWithFormat:@"Info — %@", names[0]];
+        alert.informativeText = [self infoTextForPath:paths[0]];
+    } else {
+        uint64_t totalBytes = 0;
+        int files = 0, dirs = 0, other = 0;
+        for (NSString *p in paths) {
+            struct stat st;
+            if (lstat(p.fileSystemRepresentation, &st) != 0) { other++; continue; }
+            if (S_ISDIR(st.st_mode))      dirs++;
+            else if (S_ISREG(st.st_mode)) files++;
+            else                          other++;
+            totalBytes += (uint64_t)st.st_size;
+        }
+        char sizeBuf[32];
+        pal_format_size(totalBytes, sizeBuf, sizeof(sizeBuf));
+        alert.messageText = [NSString stringWithFormat:@"Info — %lu items selected",
+                             (unsigned long)paths.count];
+        alert.informativeText = [NSString stringWithFormat:
+            @"%d file%@, %d director%@%@\nTotal size: %s",
+            files, files == 1 ? @"" : @"s",
+            dirs,  dirs  == 1 ? @"y" : @"ies",
+            other ? [NSString stringWithFormat:@", %d other", other] : @"",
+            sizeBuf];
+    }
+
+    [alert addButtonWithTitle:@"OK"];
+    [alert runModal];
+}
+
+- (NSString *)infoTextForPath:(NSString *)path {
+    const char *cpath = path.fileSystemRepresentation;
+    struct stat st;
+    if (lstat(cpath, &st) != 0) {
+        return [NSString stringWithFormat:@"Cannot stat: %s", strerror(errno)];
+    }
+
+    const char *kind = "File";
+    if      (S_ISDIR(st.st_mode))  kind = "Directory";
+    else if (S_ISLNK(st.st_mode))  kind = "Symlink";
+    else if (S_ISCHR(st.st_mode))  kind = "Char device";
+    else if (S_ISBLK(st.st_mode))  kind = "Block device";
+    else if (S_ISFIFO(st.st_mode)) kind = "FIFO";
+    else if (S_ISSOCK(st.st_mode)) kind = "Socket";
+
+    char sizeBuf[32];
+    pal_format_size((uint64_t)st.st_size, sizeBuf, sizeof(sizeBuf));
+
+    char modeBuf[16];
+    snprintf(modeBuf, sizeof(modeBuf), "%o", st.st_mode & 07777);
+
+    NSDateFormatter *df = [[NSDateFormatter alloc] init];
+    df.dateFormat = @"yyyy-MM-dd HH:mm:ss";
+    NSString *mtime = [df stringFromDate:[NSDate dateWithTimeIntervalSince1970:st.st_mtime]];
+    NSString *ctime = [df stringFromDate:[NSDate dateWithTimeIntervalSince1970:st.st_ctime]];
+
+    struct passwd *pw = getpwuid(st.st_uid);
+    struct group  *gr = getgrgid(st.st_gid);
+    NSString *owner = pw ? [NSString stringWithUTF8String:pw->pw_name]
+                         : [NSString stringWithFormat:@"%u", st.st_uid];
+    NSString *group = gr ? [NSString stringWithUTF8String:gr->gr_name]
+                         : [NSString stringWithFormat:@"%u", st.st_gid];
+
+    return [NSString stringWithFormat:
+        @"Path:        %@\n"
+        @"Kind:        %s\n"
+        @"Size:        %s (%lld bytes)\n"
+        @"Modified:    %@\n"
+        @"Changed:     %@\n"
+        @"Permissions: %s\n"
+        @"Owner:       %@ (%@)",
+        path, kind, sizeBuf, (long long)st.st_size,
+        mtime, ctime, modeBuf, owner, group];
 }
 
 #pragma mark File operations (Functions menu)
