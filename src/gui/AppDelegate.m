@@ -72,6 +72,11 @@ typedef NS_ENUM(NSInteger, ListerState) {
 - (NSInteger)rowForNamePrefix:(NSString *)prefix;
 @end
 
+@protocol ListerKeyNavTarget <NSObject>
+- (void)openSelectionAction:(id)sender;
+- (void)goUp:(id)sender;
+@end
+
 /* NSTableView subclass with:
  *   - bare Space forwarded to toggleQuickLook: (macOS consumes Space inside
  *     the table otherwise, so View → Quick Look's bare-Space keyEquivalent
@@ -100,6 +105,27 @@ typedef NS_ENUM(NSInteger, ListerState) {
         [super keyDown:event];
         return;
     }
+    /* Enter / Return → open selected row */
+    if (mods == 0 && chars.length == 1) {
+        unichar c = [chars characterAtIndex:0];
+        if (c == NSCarriageReturnCharacter || c == NSNewlineCharacter || c == NSEnterCharacter) {
+            id target = [self findNavTarget];
+            if ([target respondsToSelector:@selector(openSelectionAction:)]) {
+                [target openSelectionAction:self];
+                return;
+            }
+        }
+        /* Backspace / Delete → parent directory (only when search buffer empty) */
+        if ((c == NSBackspaceCharacter || c == NSDeleteCharacter || c == 0x7F)
+            && (_typeSearchBuffer.length == 0
+                || [NSDate timeIntervalSinceReferenceDate] - _lastTypeTime > 0.5)) {
+            id target = [self findNavTarget];
+            if ([target respondsToSelector:@selector(goUp:)]) {
+                [target goUp:self];
+                return;
+            }
+        }
+    }
 
     /* Type-to-find: single printable character, no Cmd/Ctrl */
     BOOL hasCmdOrCtrl = (mods & (NSEventModifierFlagCommand | NSEventModifierFlagControl)) != 0;
@@ -119,6 +145,21 @@ typedef NS_ENUM(NSInteger, ListerState) {
     }
 
     [super keyDown:event];
+}
+
+/* Walk up responder chain to find the ListerWindowController (which owns
+ * openSelectionAction: and goUp:). Keeps ListerTableView ignorant of the
+ * concrete class that sits above it. */
+- (id<ListerKeyNavTarget>)findNavTarget {
+    NSResponder *r = self.nextResponder;
+    while (r) {
+        if ([r respondsToSelector:@selector(openSelectionAction:)] &&
+            [r respondsToSelector:@selector(goUp:)]) {
+            return (id)r;
+        }
+        r = r.nextResponder;
+    }
+    return nil;
 }
 
 - (void)selectByTypePrefix:(NSString *)prefix {
@@ -147,7 +188,14 @@ typedef NS_ENUM(NSInteger, ListerState) {
 @property (nonatomic, copy) NSString *currentPath;
 @property (nonatomic, assign) ListerState state;
 @property (nonatomic, weak) IDOpusAppDelegate *appDelegate;
+@property (nonatomic, strong) NSMutableArray<NSString *> *history;
+@property (nonatomic, assign) NSInteger historyIndex;
+@property (nonatomic, assign) BOOL navigatingInHistory;
+@property (nonatomic, strong) NSButton *backButton;
+@property (nonatomic, strong) NSButton *forwardButton;
 - (void)setState:(ListerState)state;
+- (void)goBack:(id)sender;
+- (void)goForward:(id)sender;
 - (NSArray<NSString *> *)selectedPaths;
 - (NSArray<NSString *> *)selectedNames;
 - (void)reloadBuffer;
@@ -411,7 +459,20 @@ typedef NS_ENUM(NSInteger, ListerState) {
     _pathField.action = @selector(pathFieldAction:);
     [content addSubview:_pathField];
 
-    /* Back button */
+    /* Back / Forward (history) */
+    _backButton = [NSButton buttonWithTitle:@"\u25C0" target:self action:@selector(goBack:)];
+    _backButton.translatesAutoresizingMaskIntoConstraints = NO;
+    _backButton.bezelStyle = NSBezelStyleAccessoryBarAction;
+    _backButton.enabled = NO;
+    [content addSubview:_backButton];
+
+    _forwardButton = [NSButton buttonWithTitle:@"\u25B6" target:self action:@selector(goForward:)];
+    _forwardButton.translatesAutoresizingMaskIntoConstraints = NO;
+    _forwardButton.bezelStyle = NSBezelStyleAccessoryBarAction;
+    _forwardButton.enabled = NO;
+    [content addSubview:_forwardButton];
+
+    /* Parent button (up-arrow) */
     NSButton *backBtn = [NSButton buttonWithTitle:@"\u2191" target:self action:@selector(goUp:)];
     backBtn.translatesAutoresizingMaskIntoConstraints = NO;
     backBtn.bezelStyle = NSBezelStyleAccessoryBarAction;
@@ -541,7 +602,15 @@ typedef NS_ENUM(NSInteger, ListerState) {
 
     /* Layout */
     [NSLayoutConstraint activateConstraints:@[
-        [backBtn.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:8],
+        [_backButton.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:8],
+        [_backButton.topAnchor constraintEqualToAnchor:content.topAnchor constant:8],
+        [_backButton.widthAnchor constraintEqualToConstant:28],
+
+        [_forwardButton.leadingAnchor constraintEqualToAnchor:_backButton.trailingAnchor constant:2],
+        [_forwardButton.topAnchor constraintEqualToAnchor:content.topAnchor constant:8],
+        [_forwardButton.widthAnchor constraintEqualToConstant:28],
+
+        [backBtn.leadingAnchor constraintEqualToAnchor:_forwardButton.trailingAnchor constant:8],
         [backBtn.topAnchor constraintEqualToAnchor:content.topAnchor constant:8],
         [backBtn.widthAnchor constraintEqualToConstant:32],
 
@@ -586,6 +655,41 @@ typedef NS_ENUM(NSInteger, ListerState) {
     self.window.title = [NSString stringWithFormat:@"iDOpus — %@", path.lastPathComponent];
     [_dataSource loadPath:path];
     [self updateStatusBar];
+
+    /* History: forward-truncate on new navigation, push current, unless
+     * we got here by pressing Back/Forward. */
+    if (!_history) _history = [NSMutableArray array];
+    if (!_navigatingInHistory) {
+        if (_historyIndex < (NSInteger)_history.count - 1) {
+            [_history removeObjectsInRange:NSMakeRange(_historyIndex + 1, _history.count - _historyIndex - 1)];
+        }
+        if (_history.count == 0 || ![_history.lastObject isEqualToString:path]) {
+            [_history addObject:path];
+            _historyIndex = (NSInteger)_history.count - 1;
+        }
+    }
+    [self updateHistoryButtons];
+}
+
+- (void)updateHistoryButtons {
+    _backButton.enabled    = _historyIndex > 0;
+    _forwardButton.enabled = _historyIndex >= 0 && _historyIndex < (NSInteger)_history.count - 1;
+}
+
+- (void)goBack:(id)sender {
+    if (_historyIndex <= 0) return;
+    _historyIndex--;
+    _navigatingInHistory = YES;
+    [self loadPath:_history[_historyIndex]];
+    _navigatingInHistory = NO;
+}
+
+- (void)goForward:(id)sender {
+    if (_historyIndex < 0 || _historyIndex >= (NSInteger)_history.count - 1) return;
+    _historyIndex++;
+    _navigatingInHistory = YES;
+    [self loadPath:_history[_historyIndex]];
+    _navigatingInHistory = NO;
 }
 
 - (void)updateStatusBar {
@@ -1128,6 +1232,10 @@ typedef NS_ENUM(NSInteger, ListerState) {
                                                 action:@selector(splitDisplayAction:)
                                          keyEquivalent:@"N"];
     splitItem.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
+    [fileMenu addItem:[NSMenuItem separatorItem]];
+    [fileMenu addItemWithTitle:@"Back"    action:@selector(goBack:)    keyEquivalent:@"["];
+    [fileMenu addItemWithTitle:@"Forward" action:@selector(goForward:) keyEquivalent:@"]"];
+    [fileMenu addItem:[NSMenuItem separatorItem]];
     [fileMenu addItemWithTitle:@"Close" action:@selector(performClose:) keyEquivalent:@"w"];
     fileItem.submenu = fileMenu;
     [mainMenu addItem:fileItem];
