@@ -226,6 +226,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
 @property (nonatomic, copy) NSString *hidePattern;   /* nil = hide none */
 @property (nonatomic, assign) BOOL hideDotfiles;     /* default YES */
 @property (nonatomic, weak) ListerWindowController *owner;  /* for drag-drop access */
+@property (nonatomic, strong) NSMutableDictionary<NSString *, NSImage *> *iconCache;
 - (void)loadPath:(NSString *)path;
 - (void)sortByColumn:(NSString *)identifier;
 - (void)applyCurrentFilter;
@@ -239,8 +240,34 @@ typedef NS_ENUM(NSInteger, ListerState) {
     if (self) {
         _buffer = dir_buffer_create();
         _hideDotfiles = YES;    /* DOpus default: dotfiles filtered out */
+        _iconCache = [NSMutableDictionary dictionary];
     }
     return self;
+}
+
+- (NSImage *)iconForEntry:(dir_entry_t *)entry {
+    if (!entry || !_owner) return nil;
+    /* Cache key: extension (files) or "__dir__" (folders) — avoids one stat
+     * per cell refresh. First appearance of an extension still does one lookup. */
+    NSString *key;
+    if (dir_entry_is_dir(entry)) {
+        key = @"__dir__";
+    } else {
+        const char *ext = pal_path_extension(entry->name);
+        key = ext && *ext ? [@"." stringByAppendingString:[NSString stringWithUTF8String:ext]].lowercaseString
+                          : @"__file__";
+    }
+    NSImage *cached = _iconCache[key];
+    if (cached) return cached;
+
+    char full[4096];
+    pal_path_join([_owner.currentPath fileSystemRepresentation],
+                  entry->name, full, sizeof(full));
+    NSImage *img = [[NSWorkspace sharedWorkspace] iconForFile:
+                    [NSString stringWithUTF8String:full]];
+    img.size = NSMakeSize(16, 16);
+    if (img) _iconCache[key] = img;
+    return img;
 }
 
 - (void)dealloc {
@@ -313,11 +340,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
     NSString *text = @"";
 
     if ([identifier isEqualToString:@"name"]) {
-        NSString *name = [NSString stringWithUTF8String:entry->name ?: ""];
-        if (dir_entry_is_dir(entry))
-            text = [NSString stringWithFormat:@"\U0001F4C1 %@", name];
-        else
-            text = [NSString stringWithFormat:@"   %@", name];
+        text = [NSString stringWithUTF8String:entry->name ?: ""];
     }
     else if ([identifier isEqualToString:@"size"]) {
         if (dir_entry_is_dir(entry)) {
@@ -339,12 +362,23 @@ typedef NS_ENUM(NSInteger, ListerState) {
     }
 
     /* Build cell view with proper frame sizing */
+    BOOL isNameColumn = [identifier isEqualToString:@"name"];
     NSTableCellView *cell = [tableView makeViewWithIdentifier:identifier owner:nil];
     if (!cell) {
         cell = [[NSTableCellView alloc] initWithFrame:NSMakeRect(0, 0, tableColumn.width, 20)];
         cell.identifier = identifier;
 
-        NSTextField *tf = [[NSTextField alloc] initWithFrame:cell.bounds];
+        CGFloat textLeft = 0;
+        if (isNameColumn) {
+            NSImageView *iv = [[NSImageView alloc] initWithFrame:NSMakeRect(2, 2, 16, 16)];
+            iv.imageScaling = NSImageScaleProportionallyUpOrDown;
+            iv.autoresizingMask = NSViewMaxXMargin;
+            cell.imageView = iv;
+            [cell addSubview:iv];
+            textLeft = 22;
+        }
+
+        NSTextField *tf = [[NSTextField alloc] initWithFrame:NSMakeRect(textLeft, 0, cell.bounds.size.width - textLeft, 20)];
         tf.bordered = NO;
         tf.drawsBackground = NO;
         tf.editable = NO;
@@ -357,6 +391,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
     }
 
     cell.textField.stringValue = text;
+    if (isNameColumn) cell.imageView.image = [self iconForEntry:entry];
 
     /* Colour */
     if (dir_entry_is_selected(entry))
