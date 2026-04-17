@@ -6,6 +6,7 @@
 
 #import <Cocoa/Cocoa.h>
 #import <Quartz/Quartz.h>
+#import <objc/runtime.h>
 #include <sys/stat.h>
 #include <pwd.h>
 #include <grp.h>
@@ -59,6 +60,9 @@ typedef NS_ENUM(NSInteger, ListerState) {
 - (void)toggleHidden:(id)sender;
 - (void)toggleButtonBank:(id)sender;
 - (void)selectPatternAction:(id)sender;
+- (void)runCustomButton:(NSButton *)sender;
+- (void)addCustomButtonAction:(id)sender;
+- (void)removeCustomButtonAction:(id)sender;
 - (void)toggleQuickLook:(id)sender;
 - (void)sortByAction:(NSMenuItem *)sender;
 - (void)toggleReverseSortAction:(id)sender;
@@ -1375,6 +1379,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
 @interface ButtonBankPanelController : NSWindowController
 - (instancetype)initWithAppDelegate:(IDOpusAppDelegate *)appDelegate;
 - (void)positionBetweenLeftFrame:(NSRect)leftFrame rightFrame:(NSRect)rightFrame;
+- (void)rebuildGrid;
 + (CGFloat)desiredWidth;
 @end
 
@@ -1408,11 +1413,17 @@ typedef NS_ENUM(NSInteger, ListerState) {
 }
 
 - (void)buildGrid {
-    NSView *content = self.window.contentView;
+    [self rebuildGrid];
+}
 
-    /* Vertical stack of single-button rows — DOpus Magellan default layout
-     * when the Button Bank sits between two side-by-side Listers. */
-    struct { NSString *title; SEL action; } buttons[] = {
+/* (Re)build the vertical button column. Called on init and whenever user
+ * custom buttons are added / removed. */
+- (void)rebuildGrid {
+    NSView *content = self.window.contentView;
+    /* Remove any existing subviews so we can rebuild cleanly */
+    for (NSView *v in [content.subviews copy]) [v removeFromSuperview];
+
+    struct { NSString *title; SEL action; } builtIn[] = {
         { @"Copy",    @selector(copyAction:)    },
         { @"Move",    @selector(moveAction:)    },
         { @"Delete",  @selector(deleteAction:)  },
@@ -1426,7 +1437,6 @@ typedef NS_ENUM(NSInteger, ListerState) {
         { @"All",     @selector(allAction:)     },
         { @"None",    @selector(noneAction:)    },
     };
-    NSInteger n = sizeof(buttons)/sizeof(buttons[0]);
 
     NSStackView *column = [[NSStackView alloc] init];
     column.orientation = NSUserInterfaceLayoutOrientationVertical;
@@ -1435,20 +1445,24 @@ typedef NS_ENUM(NSInteger, ListerState) {
     column.alignment = NSLayoutAttributeCenterX;
     column.translatesAutoresizingMaskIntoConstraints = NO;
 
-    for (NSInteger i = 0; i < n; i++) {
-        NSButton *b = [NSButton buttonWithTitle:buttons[i].title
-                                         target:_appDelegate
-                                         action:buttons[i].action];
-        /* ShadowlessSquare + low vertical hugging lets buttons stretch to
-         * fill the panel height — needed so the bank spans full Lister height. */
-        b.bezelStyle = NSBezelStyleShadowlessSquare;
-        b.font = [NSFont systemFontOfSize:11];
-        [b setContentHuggingPriority:NSLayoutPriorityDefaultLow
-                      forOrientation:NSLayoutConstraintOrientationVertical];
-        b.translatesAutoresizingMaskIntoConstraints = NO;
-        [column addArrangedSubview:b];
-        [b.leadingAnchor constraintEqualToAnchor:column.leadingAnchor].active = YES;
-        [b.trailingAnchor constraintEqualToAnchor:column.trailingAnchor].active = YES;
+    for (size_t i = 0; i < sizeof(builtIn)/sizeof(builtIn[0]); i++) {
+        [self appendButton:builtIn[i].title
+                    target:_appDelegate
+                    action:builtIn[i].action
+                  intoStack:column];
+    }
+
+    NSArray<NSDictionary *> *customs = [[NSUserDefaults standardUserDefaults] arrayForKey:@"customButtons"] ?: @[];
+    for (NSDictionary *b in customs) {
+        NSString *title = b[@"title"]; NSString *cmd = b[@"command"];
+        if (!title.length || !cmd.length) continue;
+        NSButton *btn = [self appendButton:title
+                                    target:_appDelegate
+                                    action:@selector(runCustomButton:)
+                                 intoStack:column];
+        btn.toolTip = cmd;
+        btn.tag = 1;   /* mark as custom */
+        objc_setAssociatedObject(btn, "cmd", cmd, OBJC_ASSOCIATION_COPY);
     }
 
     [content addSubview:column];
@@ -1458,6 +1472,22 @@ typedef NS_ENUM(NSInteger, ListerState) {
         [column.topAnchor constraintEqualToAnchor:content.topAnchor constant:6],
         [column.bottomAnchor constraintEqualToAnchor:content.bottomAnchor constant:-6],
     ]];
+}
+
+- (NSButton *)appendButton:(NSString *)title
+                    target:(id)target
+                    action:(SEL)action
+                 intoStack:(NSStackView *)column {
+    NSButton *b = [NSButton buttonWithTitle:title target:target action:action];
+    b.bezelStyle = NSBezelStyleShadowlessSquare;
+    b.font = [NSFont systemFontOfSize:11];
+    [b setContentHuggingPriority:NSLayoutPriorityDefaultLow
+                  forOrientation:NSLayoutConstraintOrientationVertical];
+    b.translatesAutoresizingMaskIntoConstraints = NO;
+    [column addArrangedSubview:b];
+    [b.leadingAnchor constraintEqualToAnchor:column.leadingAnchor].active = YES;
+    [b.trailingAnchor constraintEqualToAnchor:column.trailingAnchor].active = YES;
+    return b;
 }
 
 /* Desired panel width when docked between two Listers */
@@ -1582,6 +1612,9 @@ typedef NS_ENUM(NSInteger, ListerState) {
                                                  action:@selector(selectPatternAction:)
                                           keyEquivalent:@"a"];
     selectItem.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
+    [funcMenu addItem:[NSMenuItem separatorItem]];
+    [funcMenu addItemWithTitle:@"Add Custom Button…"    action:@selector(addCustomButtonAction:)    keyEquivalent:@""];
+    [funcMenu addItemWithTitle:@"Remove Custom Button…" action:@selector(removeCustomButtonAction:) keyEquivalent:@""];
     funcItem.submenu = funcMenu;
     [mainMenu addItem:funcItem];
 
@@ -2040,6 +2073,95 @@ typedef NS_ENUM(NSInteger, ListerState) {
     ds.hideDotfiles = dotBox.state == NSControlStateValueOn;
     [ds applyCurrentFilter];
     [src updateStatusBar];
+}
+
+/* Custom Button Bank buttons — each stores a shell command template.
+ * Placeholder {FILES} expands to the SOURCE Lister's current selection
+ * (POSIX-escaped, space-separated); {PATH} to the currentPath. */
+- (void)runCustomButton:(NSButton *)sender {
+    NSString *cmd = objc_getAssociatedObject(sender, "cmd");
+    if (!cmd.length) return;
+    ListerWindowController *src = [self sourceOrOperating];
+    if (!src) return;
+
+    NSArray<NSString *> *paths = [src selectedPaths];
+    NSMutableArray<NSString *> *quoted = [NSMutableArray array];
+    for (NSString *p in paths) {
+        NSString *escaped = [p stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"];
+        [quoted addObject:[NSString stringWithFormat:@"'%@'", escaped]];
+    }
+    NSString *filesArg = [quoted componentsJoinedByString:@" "];
+    NSString *pathArg = [NSString stringWithFormat:@"'%@'",
+                         [src.currentPath stringByReplacingOccurrencesOfString:@"'"
+                                                                    withString:@"'\\''"]];
+
+    NSString *expanded = [cmd stringByReplacingOccurrencesOfString:@"{FILES}" withString:filesArg];
+    expanded = [expanded stringByReplacingOccurrencesOfString:@"{PATH}" withString:pathArg];
+
+    NSTask *task = [[NSTask alloc] init];
+    task.executableURL = [NSURL fileURLWithPath:@"/bin/sh"];
+    task.arguments = @[@"-c", expanded];
+    task.currentDirectoryURL = [NSURL fileURLWithPath:src.currentPath];
+    NSError *err = nil;
+    if (![task launchAndReturnError:&err]) {
+        [self showAlert:@"Custom button failed" info:err.localizedDescription style:NSAlertStyleWarning];
+    }
+}
+
+- (void)addCustomButtonAction:(id)sender {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Add Custom Button";
+    alert.informativeText = @"Use {FILES} for selected paths, {PATH} for current dir.";
+
+    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 360, 68)];
+    NSTextField *titleField = [[NSTextField alloc] initWithFrame:NSMakeRect(70, 40, 290, 24)];
+    NSTextField *titleLbl   = [NSTextField labelWithString:@"Title:"];
+    titleLbl.frame = NSMakeRect(0, 44, 64, 20);
+    NSTextField *cmdField = [[NSTextField alloc] initWithFrame:NSMakeRect(70, 8, 290, 24)];
+    cmdField.placeholderString = @"e.g. open -a TextEdit {FILES}";
+    NSTextField *cmdLbl  = [NSTextField labelWithString:@"Command:"];
+    cmdLbl.frame = NSMakeRect(0, 12, 64, 20);
+    [acc addSubview:titleLbl]; [acc addSubview:titleField];
+    [acc addSubview:cmdLbl];   [acc addSubview:cmdField];
+    alert.accessoryView = acc;
+    [alert addButtonWithTitle:@"Add"];
+    [alert addButtonWithTitle:@"Cancel"];
+    [alert.window setInitialFirstResponder:titleField];
+
+    if ([alert runModal] != NSAlertFirstButtonReturn) return;
+    NSString *title = [titleField.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    NSString *cmd = [cmdField.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    if (title.length == 0 || cmd.length == 0) return;
+
+    NSMutableArray *all = [[[NSUserDefaults standardUserDefaults] arrayForKey:@"customButtons"] mutableCopy] ?: [NSMutableArray array];
+    [all addObject:@{ @"title": title, @"command": cmd }];
+    [[NSUserDefaults standardUserDefaults] setObject:all forKey:@"customButtons"];
+    [_buttonBankPanel rebuildGrid];
+}
+
+- (void)removeCustomButtonAction:(id)sender {
+    NSArray<NSDictionary *> *all = [[NSUserDefaults standardUserDefaults] arrayForKey:@"customButtons"] ?: @[];
+    if (all.count == 0) {
+        [self showAlert:@"Remove Custom Button" info:@"No custom buttons to remove." style:NSAlertStyleInformational];
+        return;
+    }
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Remove Custom Button";
+    NSPopUpButton *popup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(0, 0, 360, 26)];
+    for (NSDictionary *b in all) {
+        [popup addItemWithTitle:[NSString stringWithFormat:@"%@ — %@", b[@"title"], b[@"command"]]];
+    }
+    alert.accessoryView = popup;
+    [alert addButtonWithTitle:@"Remove"];
+    [alert addButtonWithTitle:@"Cancel"];
+    if ([alert runModal] != NSAlertFirstButtonReturn) return;
+
+    NSInteger idx = popup.indexOfSelectedItem;
+    if (idx < 0 || idx >= (NSInteger)all.count) return;
+    NSMutableArray *updated = [all mutableCopy];
+    [updated removeObjectAtIndex:idx];
+    [[NSUserDefaults standardUserDefaults] setObject:updated forKey:@"customButtons"];
+    [_buttonBankPanel rebuildGrid];
 }
 
 - (void)selectPatternAction:(id)sender {
