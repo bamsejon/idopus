@@ -47,6 +47,8 @@ typedef NS_ENUM(NSInteger, ListerState) {
 - (void)allAction:(id)sender;
 - (void)noneAction:(id)sender;
 - (void)infoAction:(id)sender;
+- (void)filterAction:(id)sender;
+- (void)toggleHidden:(id)sender;
 - (void)toggleButtonBank:(id)sender;
 @end
 
@@ -57,8 +59,12 @@ typedef NS_ENUM(NSInteger, ListerState) {
 @property (nonatomic) dir_buffer_t *buffer;
 @property (nonatomic, assign) NSTableView *tableView;
 @property (nonatomic, copy) void (^onColumnClick)(NSString *identifier);
+@property (nonatomic, copy) NSString *showPattern;   /* nil = show all */
+@property (nonatomic, copy) NSString *hidePattern;   /* nil = hide none */
+@property (nonatomic, assign) BOOL hideDotfiles;     /* default YES */
 - (void)loadPath:(NSString *)path;
 - (void)sortByColumn:(NSString *)identifier;
+- (void)applyCurrentFilter;
 @end
 
 @implementation ListerDataSource
@@ -67,6 +73,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
     self = [super init];
     if (self) {
         _buffer = dir_buffer_create();
+        _hideDotfiles = YES;    /* DOpus default: dotfiles filtered out */
     }
     return self;
 }
@@ -78,6 +85,17 @@ typedef NS_ENUM(NSInteger, ListerState) {
 - (void)loadPath:(NSString *)path {
     if (!_buffer || !path) return;
     dir_buffer_read(_buffer, [path fileSystemRepresentation]);
+    [self applyCurrentFilter];
+    [_tableView reloadData];
+}
+
+- (void)applyCurrentFilter {
+    if (!_buffer) return;
+    dir_buffer_set_filter(_buffer,
+                          _showPattern.length ? [_showPattern UTF8String] : NULL,
+                          _hidePattern.length ? [_hidePattern UTF8String] : NULL,
+                          _hideDotfiles);
+    dir_buffer_apply_filter(_buffer);
     [_tableView reloadData];
 }
 
@@ -200,6 +218,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
 - (NSArray<NSString *> *)selectedPaths;
 - (NSArray<NSString *> *)selectedNames;
 - (void)reloadBuffer;
+- (void)updateStatusBar;
 @end
 
 @implementation ListerWindowController
@@ -307,6 +326,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
         { @"Rename",  @selector(renameAction:),  _appDelegate },
         { @"MakeDir", @selector(makeDirAction:), _appDelegate },
         { @"Info",    @selector(infoAction:),    _appDelegate },
+        { @"Filter",  @selector(filterAction:),  _appDelegate },
         { @"",        NULL, nil },  /* separator */
         { @"Parent",  @selector(goUp:),          self },
         { @"Root",    @selector(goRoot:),        self },
@@ -730,6 +750,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
         { @"Rename",  @selector(renameAction:)  },
         { @"MakeDir", @selector(makeDirAction:) },
         { @"Info",    @selector(infoAction:)    },
+        { @"Filter",  @selector(filterAction:)  },
         { @"Parent",  @selector(parentAction:)  },
         { @"Root",    @selector(rootAction:)    },
         { @"Refresh", @selector(refreshAction:) },
@@ -871,6 +892,11 @@ typedef NS_ENUM(NSInteger, ListerState) {
     [self addFunctionItem:funcMenu title:@"MakeDir" action:@selector(makeDirAction:) fkey:NSF7FunctionKey];
     [self addFunctionItem:funcMenu title:@"Delete"  action:@selector(deleteAction:)  fkey:NSF8FunctionKey];
     [self addFunctionItem:funcMenu title:@"Info"    action:@selector(infoAction:)    fkey:NSF9FunctionKey];
+    [funcMenu addItem:[NSMenuItem separatorItem]];
+    NSMenuItem *filterItem = [funcMenu addItemWithTitle:@"Filter…"
+                                                 action:@selector(filterAction:)
+                                          keyEquivalent:@"f"];
+    filterItem.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
     funcItem.submenu = funcMenu;
     [mainMenu addItem:funcItem];
 
@@ -1047,6 +1073,67 @@ typedef NS_ENUM(NSInteger, ListerState) {
 
     [alert addButtonWithTitle:@"OK"];
     [alert runModal];
+}
+
+/* Filter — DOpus Show/Hide pattern. Scope: active source Lister.
+ * Pattern uses pal_path_match glob syntax (e.g. *.txt, .*, [abc]*).
+ * Empty field = no restriction on that direction. */
+- (void)filterAction:(id)sender {
+    ListerWindowController *src = [self sourceOrOperating];
+    if (!src) return;
+    ListerDataSource *ds = src.dataSource;
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Filter";
+    alert.informativeText = @"Glob patterns. Leave blank to clear.";
+
+    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 320, 96)];
+
+    NSTextField *showLabel = [NSTextField labelWithString:@"Show:"];
+    showLabel.frame = NSMakeRect(0, 72, 60, 20);
+    [acc addSubview:showLabel];
+    NSTextField *showField = [[NSTextField alloc] initWithFrame:NSMakeRect(64, 68, 256, 24)];
+    showField.stringValue = ds.showPattern ?: @"";
+    [acc addSubview:showField];
+
+    NSTextField *hideLabel = [NSTextField labelWithString:@"Hide:"];
+    hideLabel.frame = NSMakeRect(0, 40, 60, 20);
+    [acc addSubview:hideLabel];
+    NSTextField *hideField = [[NSTextField alloc] initWithFrame:NSMakeRect(64, 36, 256, 24)];
+    hideField.stringValue = ds.hidePattern ?: @"";
+    [acc addSubview:hideField];
+
+    NSButton *dotBox = [NSButton checkboxWithTitle:@"Hide dotfiles (.*)" target:nil action:nil];
+    dotBox.frame = NSMakeRect(0, 4, 320, 24);
+    dotBox.state = ds.hideDotfiles ? NSControlStateValueOn : NSControlStateValueOff;
+    [acc addSubview:dotBox];
+
+    alert.accessoryView = acc;
+    [alert addButtonWithTitle:@"Apply"];
+    [alert addButtonWithTitle:@"Cancel"];
+    [alert.window setInitialFirstResponder:showField];
+
+    if ([alert runModal] != NSAlertFirstButtonReturn) return;
+
+    ds.showPattern  = [showField.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    ds.hidePattern  = [hideField.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    ds.hideDotfiles = dotBox.state == NSControlStateValueOn;
+    [ds applyCurrentFilter];
+    [src updateStatusBar];
+}
+
+- (void)toggleHidden:(id)sender {
+    /* Global: flip hideDotfiles on every Lister, keeping per-Lister patterns. */
+    BOOL anyShowing = NO;
+    for (ListerWindowController *lw in _listerControllers) {
+        if (!lw.dataSource.hideDotfiles) { anyShowing = YES; break; }
+    }
+    BOOL newHide = anyShowing;  /* if any is showing, hide all — uniform toggle */
+    for (ListerWindowController *lw in _listerControllers) {
+        lw.dataSource.hideDotfiles = newHide;
+        [lw.dataSource applyCurrentFilter];
+        [lw updateStatusBar];
+    }
 }
 
 - (NSString *)infoTextForPath:(NSString *)path {

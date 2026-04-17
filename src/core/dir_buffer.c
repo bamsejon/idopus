@@ -327,14 +327,13 @@ void dir_buffer_set_filter(dir_buffer_t *buf,
 static bool entry_should_reject(dir_entry_t *entry, list_format_t *fmt)
 {
     if (!entry) return true;
-    /* Don't reject directories */
-    if (dir_entry_is_dir(entry)) return false;
-    /* Hidden files */
+    /* Hidden flag: applies to both files and directories (matches macOS Finder) */
     if (fmt->reject_hidden && (entry->flags & ENTF_HIDDEN)) return true;
-    /* Show pattern — must match */
+    /* Show/hide patterns apply to files only — directories are always reachable
+     * so navigation isn't trapped by a restrictive pattern. */
+    if (dir_entry_is_dir(entry)) return false;
     if (fmt->show_pattern[0] && !pal_path_match(fmt->show_pattern, entry->name))
         return true;
-    /* Hide pattern — must NOT match */
     if (fmt->hide_pattern[0] && pal_path_match(fmt->hide_pattern, entry->name))
         return true;
     return false;
