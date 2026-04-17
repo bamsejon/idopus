@@ -27,6 +27,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
 /* Forward declarations */
 @class ListerWindowController;
 @class ButtonBankPanelController;
+@class PreferencesWindowController;
 
 /* --- App Delegate --- */
 
@@ -36,6 +37,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
 @property (nonatomic, weak) ListerWindowController *activeSource;
 @property (nonatomic, weak) ListerWindowController *activeDest;
 @property (nonatomic, strong) ButtonBankPanelController *buttonBankPanel;
+@property (nonatomic, strong) PreferencesWindowController *preferencesWindow;
 
 - (void)refreshAllListersShowing:(NSString *)path;
 - (void)showAlert:(NSString *)title info:(NSString *)info style:(NSAlertStyle)style;
@@ -50,6 +52,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
 - (ListerWindowController *)newListerWindow:(NSString *)path frame:(NSRect)frame;
 - (void)promoteToSource:(ListerWindowController *)ctrl;
 - (void)listerClosing:(ListerWindowController *)ctrl;
+- (void)showPreferencesAction:(id)sender;
 
 /* Button Bank panel actions — operate on the active SOURCE lister */
 - (void)parentAction:(id)sender;
@@ -270,7 +273,9 @@ typedef NS_ENUM(NSInteger, ListerState) {
     self = [super init];
     if (self) {
         _buffer = dir_buffer_create();
-        _hideDotfiles = YES;    /* DOpus default: dotfiles filtered out */
+        NSUserDefaults *u = [NSUserDefaults standardUserDefaults];
+        _hideDotfiles = [u objectForKey:@"prefHideDotfilesDefault"]
+                          ? [u boolForKey:@"prefHideDotfilesDefault"] : YES;
         _iconCache = [NSMutableDictionary dictionary];
         _thumbnailCache = [[NSCache alloc] init];
         _thumbnailCache.countLimit = 512;
@@ -2132,6 +2137,119 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
 
 @end
 
+#pragma mark - Preferences Window
+
+/* Simple preferences panel bound to NSUserDefaults. Each checkbox writes its
+ * key on change — settings take effect on next relevant trigger (next launch
+ * for startup flags, next filter apply for display flags). */
+@interface PreferencesWindowController : NSWindowController
+- (instancetype)initWithAppDelegate:(IDOpusAppDelegate *)app;
+@end
+
+@implementation PreferencesWindowController {
+    __weak IDOpusAppDelegate *_app;
+}
+
+- (instancetype)initWithAppDelegate:(IDOpusAppDelegate *)app {
+    NSRect frame = NSMakeRect(0, 0, 460, 280);
+    NSWindow *w = [[NSWindow alloc] initWithContentRect:frame
+                                              styleMask:(NSWindowStyleMaskTitled |
+                                                         NSWindowStyleMaskClosable)
+                                                backing:NSBackingStoreBuffered
+                                                  defer:NO];
+    w.title = @"Preferences";
+    w.releasedWhenClosed = NO;
+
+    self = [super initWithWindow:w];
+    if (!self) return nil;
+    _app = app;
+
+    NSView *c = w.contentView;
+    NSStackView *col = [[NSStackView alloc] init];
+    col.orientation = NSUserInterfaceLayoutOrientationVertical;
+    col.alignment = NSLayoutAttributeLeading;
+    col.spacing = 10;
+    col.translatesAutoresizingMaskIntoConstraints = NO;
+    [c addSubview:col];
+
+    NSTextField *header = [NSTextField labelWithString:@"General"];
+    header.font = [NSFont boldSystemFontOfSize:13];
+    [col addArrangedSubview:header];
+
+    [col addArrangedSubview:[self makeCheckbox:@"Hide dotfiles by default"
+                                           key:@"prefHideDotfilesDefault" defaultOn:YES]];
+    [col addArrangedSubview:[self makeCheckbox:@"Restore last-open paths at launch"
+                                           key:@"prefRestoreLastPaths" defaultOn:YES]];
+    [col addArrangedSubview:[self makeCheckbox:@"Open dual-pane at launch"
+                                           key:@"prefDualPaneStartup" defaultOn:YES]];
+    [col addArrangedSubview:[self makeCheckbox:@"Show Button Bank at launch"
+                                           key:@"prefButtonBankVisible" defaultOn:YES]];
+
+    NSTextField *deleteHeader = [NSTextField labelWithString:@"File operations"];
+    deleteHeader.font = [NSFont boldSystemFontOfSize:13];
+    [col addArrangedSubview:deleteHeader];
+
+    [col addArrangedSubview:[self makeCheckbox:@"Delete sends items to Trash (recommended)"
+                                           key:@"prefDeleteToTrash" defaultOn:YES]];
+
+    /* Footer: Reset button */
+    NSButton *reset = [NSButton buttonWithTitle:@"Reset All Preferences…"
+                                         target:self
+                                         action:@selector(resetAction:)];
+    reset.bezelStyle = NSBezelStyleRounded;
+    [col addArrangedSubview:reset];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [col.leadingAnchor  constraintEqualToAnchor:c.leadingAnchor  constant:20],
+        [col.trailingAnchor constraintEqualToAnchor:c.trailingAnchor constant:-20],
+        [col.topAnchor      constraintEqualToAnchor:c.topAnchor      constant:20],
+        [col.bottomAnchor   constraintLessThanOrEqualToAnchor:c.bottomAnchor constant:-20],
+    ]];
+
+    return self;
+}
+
+- (NSButton *)makeCheckbox:(NSString *)title key:(NSString *)key defaultOn:(BOOL)defaultOn {
+    NSButton *b = [NSButton checkboxWithTitle:title target:self action:@selector(toggleChanged:)];
+    NSUserDefaults *u = [NSUserDefaults standardUserDefaults];
+    id stored = [u objectForKey:key];
+    BOOL on = stored ? [stored boolValue] : defaultOn;
+    b.state = on ? NSControlStateValueOn : NSControlStateValueOff;
+    objc_setAssociatedObject(b, "prefKey", key, OBJC_ASSOCIATION_COPY);
+    return b;
+}
+
+- (void)toggleChanged:(NSButton *)sender {
+    NSString *key = objc_getAssociatedObject(sender, "prefKey");
+    if (!key) return;
+    [[NSUserDefaults standardUserDefaults] setBool:(sender.state == NSControlStateValueOn) forKey:key];
+}
+
+- (void)resetAction:(id)sender {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Reset all preferences?";
+    alert.informativeText = @"Custom buttons, bookmarks, file type actions, hidden columns and all other iDOpus settings will be cleared. This cannot be undone.";
+    alert.alertStyle = NSAlertStyleWarning;
+    [alert addButtonWithTitle:@"Reset"];
+    [alert addButtonWithTitle:@"Cancel"];
+    if ([alert runModal] != NSAlertFirstButtonReturn) return;
+
+    NSUserDefaults *u = [NSUserDefaults standardUserDefaults];
+    NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier] ?: @"se.bamsejon.idopus";
+    [u removePersistentDomainForName:bundleID];
+    [u synchronize];
+
+    [self.window close];
+
+    NSAlert *done = [[NSAlert alloc] init];
+    done.messageText = @"Preferences reset";
+    done.informativeText = @"Quit iDOpus and relaunch to pick up the defaults.";
+    [done addButtonWithTitle:@"OK"];
+    [done runModal];
+}
+
+@end
+
 #pragma mark - App Delegate
 
 @implementation IDOpusAppDelegate
@@ -2156,27 +2274,41 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     NSRect bankFrame  = NSMakeRect(x + listerW,             y, bankW,   h);
     NSRect rightFrame = NSMakeRect(x + listerW + bankW,     y, listerW, h);
 
-    /* Restore last-open paths if saved, otherwise two Home panels. */
+    /* Startup preferences */
+    NSUserDefaults *u = [NSUserDefaults standardUserDefaults];
+    BOOL restore  = [u objectForKey:@"prefRestoreLastPaths"]  ? [u boolForKey:@"prefRestoreLastPaths"]  : YES;
+    BOOL dualPane = [u objectForKey:@"prefDualPaneStartup"]   ? [u boolForKey:@"prefDualPaneStartup"]   : YES;
+    BOOL showBank = [u objectForKey:@"prefButtonBankVisible"] ? [u boolForKey:@"prefButtonBankVisible"] : YES;
+
     NSFileManager *fileMgr = [NSFileManager defaultManager];
-    NSArray<NSString *> *lastPaths = [[NSUserDefaults standardUserDefaults] arrayForKey:@"lastPaths"];
+    NSArray<NSString *> *lastPaths = restore ? [u arrayForKey:@"lastPaths"] : nil;
     NSString *leftPath  = (lastPaths.count >= 1 && [fileMgr fileExistsAtPath:lastPaths[0]])
                           ? lastPaths[0] : NSHomeDirectory();
     NSString *rightPath = (lastPaths.count >= 2 && [fileMgr fileExistsAtPath:lastPaths[1]])
                           ? lastPaths[1] : NSHomeDirectory();
-
-    ListerWindowController *left  = [self newListerWindow:leftPath  frame:leftFrame];
-    ListerWindowController *right = [self newListerWindow:rightPath frame:rightFrame];
-    [left.window setFrame:leftFrame display:YES animate:NO];
-    [right.window setFrame:rightFrame display:YES animate:NO];
-
-    /* Button Bank panel docked between the two Listers */
-    _buttonBankPanel = [[ButtonBankPanelController alloc] initWithAppDelegate:self];
     (void)bankFrame;
-    [_buttonBankPanel.window orderFront:nil];
-    [_buttonBankPanel positionBetweenLeftFrame:leftFrame rightFrame:rightFrame];
 
-    /* Keep the SOURCE Lister key after bringing up the panel */
-    [right.window makeKeyAndOrderFront:nil];
+    if (dualPane) {
+        ListerWindowController *left  = [self newListerWindow:leftPath  frame:leftFrame];
+        ListerWindowController *right = [self newListerWindow:rightPath frame:rightFrame];
+        [left.window setFrame:leftFrame display:YES animate:NO];
+        [right.window setFrame:rightFrame display:YES animate:NO];
+
+        _buttonBankPanel = [[ButtonBankPanelController alloc] initWithAppDelegate:self];
+        [_buttonBankPanel positionBetweenLeftFrame:leftFrame rightFrame:rightFrame];
+        if (showBank) [_buttonBankPanel.window orderFront:nil];
+
+        [right.window makeKeyAndOrderFront:nil];
+    } else {
+        NSRect single = NSMakeRect(x, y, totalW, h);
+        ListerWindowController *one = [self newListerWindow:leftPath frame:single];
+        [one.window setFrame:single display:YES animate:NO];
+
+        _buttonBankPanel = [[ButtonBankPanelController alloc] initWithAppDelegate:self];
+        if (showBank) [_buttonBankPanel.window orderFront:nil];
+
+        [one.window makeKeyAndOrderFront:nil];
+    }
 }
 
 - (void)applicationWillTerminate:(NSNotification *)notification {
@@ -2203,6 +2335,11 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     NSMenuItem *appItem = [[NSMenuItem alloc] init];
     NSMenu *appMenu = [[NSMenu alloc] initWithTitle:@"iDOpus"];
     [appMenu addItemWithTitle:@"About iDOpus" action:@selector(orderFrontStandardAboutPanel:) keyEquivalent:@""];
+    [appMenu addItem:[NSMenuItem separatorItem]];
+    NSMenuItem *prefsItem = [appMenu addItemWithTitle:@"Preferences…"
+                                               action:@selector(showPreferencesAction:)
+                                        keyEquivalent:@","];
+    prefsItem.target = self;
     [appMenu addItem:[NSMenuItem separatorItem]];
     [appMenu addItemWithTitle:@"Quit iDOpus" action:@selector(terminate:) keyEquivalent:@"q"];
     appItem.submenu = appMenu;
@@ -2458,6 +2595,14 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     if (_activeSource == ctrl) _activeSource = nil;
     if (_activeDest == ctrl) _activeDest = nil;
     [_listerControllers removeObject:ctrl];
+}
+
+- (void)showPreferencesAction:(id)sender {
+    if (!_preferencesWindow) {
+        _preferencesWindow = [[PreferencesWindowController alloc] initWithAppDelegate:self];
+    }
+    [_preferencesWindow.window center];
+    [_preferencesWindow.window makeKeyAndOrderFront:sender];
 }
 
 #pragma mark Unified Button Bank actions (operate on active SOURCE)
@@ -3560,16 +3705,22 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
         return;
     }
 
+    NSUserDefaults *u = [NSUserDefaults standardUserDefaults];
+    BOOL toTrash = [u objectForKey:@"prefDeleteToTrash"] ? [u boolForKey:@"prefDeleteToTrash"] : YES;
+
     NSAlert *alert = [[NSAlert alloc] init];
-    alert.messageText = [NSString stringWithFormat:@"Move %lu item%@ to Trash?",
-                         (unsigned long)paths.count, paths.count == 1 ? @"" : @"s"];
+    alert.messageText = toTrash
+        ? [NSString stringWithFormat:@"Move %lu item%@ to Trash?",
+                    (unsigned long)paths.count, paths.count == 1 ? @"" : @"s"]
+        : [NSString stringWithFormat:@"Permanently delete %lu item%@? This cannot be undone.",
+                    (unsigned long)paths.count, paths.count == 1 ? @"" : @"s"];
     NSArray<NSString *> *names = [src selectedNames];
     NSMutableArray *preview = [NSMutableArray array];
     for (NSUInteger i = 0; i < MIN(5u, names.count); i++) [preview addObject:names[i]];
     if (names.count > 5) [preview addObject:[NSString stringWithFormat:@"… and %lu more", (unsigned long)(names.count - 5)]];
     alert.informativeText = [preview componentsJoinedByString:@"\n"];
-    alert.alertStyle = NSAlertStyleWarning;
-    [alert addButtonWithTitle:@"Move to Trash"];
+    alert.alertStyle = toTrash ? NSAlertStyleWarning : NSAlertStyleCritical;
+    [alert addButtonWithTitle:toTrash ? @"Move to Trash" : @"Delete"];
     [alert addButtonWithTitle:@"Cancel"];
 
     if ([alert runModal] != NSAlertFirstButtonReturn) return;
@@ -3578,7 +3729,10 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     NSMutableArray<NSString *> *failed = [NSMutableArray array];
     for (NSString *p in paths) {
         NSError *err = nil;
-        if (![fm trashItemAtURL:[NSURL fileURLWithPath:p] resultingItemURL:nil error:&err]) {
+        BOOL ok = toTrash
+            ? [fm trashItemAtURL:[NSURL fileURLWithPath:p] resultingItemURL:nil error:&err]
+            : [fm removeItemAtURL:[NSURL fileURLWithPath:p] error:&err];
+        if (!ok) {
             [failed addObject:[NSString stringWithFormat:@"%@: %@", p.lastPathComponent, err.localizedDescription]];
         }
     }
