@@ -63,6 +63,28 @@ typedef NS_ENUM(NSInteger, ListerState) {
 
 #pragma mark - Lister Table Data
 
+#pragma mark - Lister Table View
+
+/* NSTableView subclass that forwards bare Space to the Quick Look action.
+ * Without this, macOS consumes Space inside the table (no forwarding to the
+ * menu), so View → Quick Look's bare-Space keyEquivalent never fires from
+ * inside the table. */
+@interface ListerTableView : NSTableView
+@end
+
+@implementation ListerTableView
+- (void)keyDown:(NSEvent *)event {
+    if (event.modifierFlags == 0 || (event.modifierFlags & NSEventModifierFlagDeviceIndependentFlagsMask) == 0) {
+        NSString *chars = event.charactersIgnoringModifiers;
+        if ([chars isEqualToString:@" "]) {
+            [NSApp sendAction:@selector(toggleQuickLook:) to:nil from:self];
+            return;
+        }
+    }
+    [super keyDown:event];
+}
+@end
+
 #pragma mark - Lister Window Controller (interface)
 
 @class ListerDataSource;
@@ -345,7 +367,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
     scrollView.hasHorizontalScroller = YES;
     scrollView.translatesAutoresizingMaskIntoConstraints = NO;
 
-    _tableView = [[NSTableView alloc] init];
+    _tableView = [[ListerTableView alloc] init];
     _tableView.usesAlternatingRowBackgroundColors = YES;
     _tableView.allowsMultipleSelection = YES;
     _tableView.doubleAction = @selector(tableDoubleClick:);
