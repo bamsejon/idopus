@@ -39,6 +39,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
 - (void)performDropOntoLister:(ListerWindowController *)dest
                      fromURLs:(NSArray<NSURL *> *)urls
                        asMove:(BOOL)isMove;
+- (NSString *)uniqueChild:(NSString *)name inDir:(NSString *)dir;
 @end
 
 @interface IDOpusAppDelegate ()
@@ -525,7 +526,9 @@ typedef NS_ENUM(NSInteger, ListerState) {
     NSMenuItem *openWith = [menu addItemWithTitle:@"Open With" action:NULL keyEquivalent:@""];
     openWith.submenu = [[NSMenu alloc] initWithTitle:@"Open With"];
     [menu addItemWithTitle:@"Reveal in Finder" action:@selector(revealInFinderAction:) keyEquivalent:@""].target = self;
+    [menu addItemWithTitle:@"Copy Path"       action:@selector(copyPathAction:) keyEquivalent:@""].target = self;
     [menu addItem:[NSMenuItem separatorItem]];
+    [menu addItemWithTitle:@"Duplicate"       action:@selector(duplicateAction:) keyEquivalent:@""].target = self;
     [menu addItemWithTitle:@"Compress"       action:@selector(compressAction:)  keyEquivalent:@""].target = self;
     NSMenuItem *extract = [menu addItemWithTitle:@"Extract" action:@selector(extractAction:) keyEquivalent:@""];
     extract.target = self;
@@ -834,6 +837,53 @@ typedef NS_ENUM(NSInteger, ListerState) {
                        withApplicationAtURL:appURL
                               configuration:cfg
                           completionHandler:nil];
+}
+
+- (void)copyPathAction:(id)sender {
+    NSArray<NSString *> *paths = [self selectedPaths];
+    if (paths.count == 0) {
+        NSString *clickPath = [self pathForContextClick];
+        if (!clickPath) return;
+        paths = @[clickPath];
+    }
+    NSString *joined = [paths componentsJoinedByString:@"\n"];
+    NSPasteboard *pb = [NSPasteboard generalPasteboard];
+    [pb clearContents];
+    [pb setString:joined forType:NSPasteboardTypeString];
+}
+
+- (void)duplicateAction:(id)sender {
+    NSArray<NSString *> *paths = [self selectedPaths];
+    NSArray<NSString *> *names = [self selectedNames];
+    if (paths.count == 0) {
+        NSString *click = [self pathForContextClick];
+        if (!click) return;
+        paths = @[click];
+        names = @[click.lastPathComponent];
+    }
+
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSMutableArray<NSString *> *failed = [NSMutableArray array];
+    for (NSUInteger i = 0; i < paths.count; i++) {
+        NSString *from = paths[i];
+        NSString *name = names[i];
+        NSString *base = [name stringByDeletingPathExtension];
+        NSString *ext = name.pathExtension;
+        NSString *newName = ext.length
+            ? [NSString stringWithFormat:@"%@ copy.%@", base, ext]
+            : [NSString stringWithFormat:@"%@ copy", base];
+        NSString *to = [self.appDelegate uniqueChild:newName inDir:_currentPath];
+        NSError *err = nil;
+        if (![fm copyItemAtPath:from toPath:to error:&err]) {
+            [failed addObject:[NSString stringWithFormat:@"%@: %@", name, err.localizedDescription]];
+        }
+    }
+    [self.appDelegate refreshAllListersShowing:_currentPath];
+    if (failed.count > 0) {
+        [self.appDelegate showAlert:@"Some items could not be duplicated"
+                               info:[failed componentsJoinedByString:@"\n"]
+                              style:NSAlertStyleWarning];
+    }
 }
 
 - (BOOL)pathIsArchive:(NSString *)path {
@@ -1469,6 +1519,10 @@ typedef NS_ENUM(NSInteger, ListerState) {
     NSMenuItem *fileItem = [[NSMenuItem alloc] init];
     NSMenu *fileMenu = [[NSMenu alloc] initWithTitle:@"File"];
     [fileMenu addItemWithTitle:@"New Lister" action:@selector(newListerAction:) keyEquivalent:@"n"];
+    NSMenuItem *newFileMenu = [fileMenu addItemWithTitle:@"New File…"
+                                                  action:@selector(newFileAction:)
+                                           keyEquivalent:@"n"];
+    newFileMenu.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagOption;
     NSMenuItem *splitItem = [fileMenu addItemWithTitle:@"Split Display"
                                                 action:@selector(splitDisplayAction:)
                                          keyEquivalent:@"N"];
@@ -2054,6 +2108,50 @@ typedef NS_ENUM(NSInteger, ListerState) {
                    info:[failed componentsJoinedByString:@"\n"]
                   style:NSAlertStyleWarning];
     }
+}
+
+- (NSString *)uniqueChild:(NSString *)name inDir:(NSString *)dir {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *p = [dir stringByAppendingPathComponent:name];
+    if (![fm fileExistsAtPath:p]) return p;
+    NSString *base = [name stringByDeletingPathExtension];
+    NSString *ext = name.pathExtension;
+    for (int i = 2; i < 1000; i++) {
+        NSString *cand = ext.length
+            ? [NSString stringWithFormat:@"%@ %d.%@", base, i, ext]
+            : [NSString stringWithFormat:@"%@ %d",   base, i];
+        NSString *try = [dir stringByAppendingPathComponent:cand];
+        if (![fm fileExistsAtPath:try]) return try;
+    }
+    return p;
+}
+
+- (void)newFileAction:(id)sender {
+    ListerWindowController *src = [self operatingLister];
+    if (!src) return;
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"New File";
+    alert.informativeText = [NSString stringWithFormat:@"In: %@", src.currentPath];
+    NSTextField *input = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 300, 24)];
+    input.stringValue = @"Untitled.txt";
+    alert.accessoryView = input;
+    [alert addButtonWithTitle:@"Create"];
+    [alert addButtonWithTitle:@"Cancel"];
+    [alert.window setInitialFirstResponder:input];
+    [input selectText:nil];
+
+    if ([alert runModal] != NSAlertFirstButtonReturn) return;
+    NSString *name = [input.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    if (name.length == 0) return;
+
+    NSString *newPath = [self uniqueChild:name inDir:src.currentPath];
+    NSError *err = nil;
+    if (![[NSData data] writeToFile:newPath options:NSDataWritingWithoutOverwriting error:&err]) {
+        [self showAlert:@"New File failed" info:err.localizedDescription style:NSAlertStyleWarning];
+        return;
+    }
+    [self refreshAllListersShowing:src.currentPath];
 }
 
 - (void)makeDirAction:(id)sender {
