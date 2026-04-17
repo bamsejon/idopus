@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(idopus VERSION 0.7.1 LANGUAGES C)
+project(idopus VERSION 0.7.2 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -44,6 +44,7 @@ if(APPLE)
     target_compile_options(idopus PRIVATE "-fobjc-arc")
     target_link_libraries(idopus PRIVATE core pal
         "-framework Cocoa"
+        "-framework Quartz"
         pthread
     )
     set_target_properties(idopus PROPERTIES

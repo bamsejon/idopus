@@ -5,6 +5,7 @@
  */
 
 #import <Cocoa/Cocoa.h>
+#import <Quartz/Quartz.h>
 #include <sys/stat.h>
 #include <pwd.h>
 #include <grp.h>
@@ -57,6 +58,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
 - (void)toggleHidden:(id)sender;
 - (void)toggleButtonBank:(id)sender;
 - (void)selectPatternAction:(id)sender;
+- (void)toggleQuickLook:(id)sender;
 @end
 
 #pragma mark - Lister Table Data
@@ -65,7 +67,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
 
 @class ListerDataSource;
 
-@interface ListerWindowController : NSWindowController <NSWindowDelegate>
+@interface ListerWindowController : NSWindowController <NSWindowDelegate, QLPreviewPanelDataSource, QLPreviewPanelDelegate>
 @property (nonatomic, strong) ListerDataSource *dataSource;
 @property (nonatomic, strong) NSTableView *tableView;
 @property (nonatomic, strong) NSTextField *pathField;
@@ -589,6 +591,30 @@ typedef NS_ENUM(NSInteger, ListerState) {
     [[NSWorkspace sharedWorkspace] activateFileViewerSelectingURLs:urls];
 }
 
+#pragma mark Quick Look
+
+- (BOOL)acceptsPreviewPanelControl:(QLPreviewPanel *)panel { return YES; }
+
+- (void)beginPreviewPanelControl:(QLPreviewPanel *)panel {
+    panel.dataSource = self;
+    panel.delegate = self;
+}
+
+- (void)endPreviewPanelControl:(QLPreviewPanel *)panel {
+    panel.dataSource = nil;
+    panel.delegate = nil;
+}
+
+- (NSInteger)numberOfPreviewItemsInPreviewPanel:(QLPreviewPanel *)panel {
+    return (NSInteger)[self selectedPaths].count;
+}
+
+- (id<QLPreviewItem>)previewPanel:(QLPreviewPanel *)panel previewItemAtIndex:(NSInteger)idx {
+    NSArray<NSString *> *paths = [self selectedPaths];
+    if (idx < 0 || idx >= (NSInteger)paths.count) return nil;
+    return [NSURL fileURLWithPath:paths[idx]];
+}
+
 - (void)selectByPattern:(NSString *)pattern {
     if (!_dataSource.buffer || !pattern.length) return;
     NSMutableIndexSet *idx = [NSMutableIndexSet indexSet];
@@ -1049,6 +1075,11 @@ typedef NS_ENUM(NSInteger, ListerState) {
     NSMenu *viewMenu = [[NSMenu alloc] initWithTitle:@"View"];
     [viewMenu addItemWithTitle:@"Show Hidden Files" action:@selector(toggleHidden:) keyEquivalent:@"."];
     [viewMenu addItem:[NSMenuItem separatorItem]];
+    NSMenuItem *qlItem = [viewMenu addItemWithTitle:@"Quick Look"
+                                             action:@selector(toggleQuickLook:)
+                                      keyEquivalent:@" "];
+    qlItem.keyEquivalentModifierMask = 0;  /* bare Space */
+    [viewMenu addItem:[NSMenuItem separatorItem]];
     [viewMenu addItemWithTitle:@"Show/Hide Buttons" action:@selector(toggleButtonBank:) keyEquivalent:@"b"];
     viewItem.submenu = viewMenu;
     [mainMenu addItem:viewItem];
@@ -1167,6 +1198,18 @@ typedef NS_ENUM(NSInteger, ListerState) {
 - (void)refreshAction:(id)sender { [[self sourceOrOperating] refresh:sender]; }
 - (void)allAction:(id)sender     { [[self sourceOrOperating] selectAllFiles:sender]; }
 - (void)noneAction:(id)sender    { [[self sourceOrOperating] deselectAllFiles:sender]; }
+
+- (void)toggleQuickLook:(id)sender {
+    QLPreviewPanel *panel = [QLPreviewPanel sharedPreviewPanel];
+    if (panel.isVisible) {
+        [panel orderOut:nil];
+    } else {
+        /* Make the key Lister window the first responder chain root for the panel.
+         * QLPreviewPanel will query the responder chain for acceptsPreviewPanelControl:,
+         * which our ListerWindowController answers YES. */
+        [panel makeKeyAndOrderFront:nil];
+    }
+}
 
 - (void)toggleButtonBank:(id)sender {
     if (!_buttonBankPanel) return;
