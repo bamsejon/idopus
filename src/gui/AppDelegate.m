@@ -2310,28 +2310,72 @@ typedef NS_ENUM(NSInteger, ListerState) {
         return;
     }
 
+    /* Quick check: are any of the selected items directories? If so, compute
+     * recursive size on a background queue with a busy sheet; otherwise no
+     * background work needed. */
+    BOOL anyDir = NO;
+    for (NSString *p in paths) {
+        struct stat st;
+        if (lstat(p.fileSystemRepresentation, &st) == 0 && S_ISDIR(st.st_mode)) { anyDir = YES; break; }
+    }
+
+    if (!anyDir) {
+        [self showInfoAlertWithPaths:paths names:names sizes:nil];
+        return;
+    }
+
+    /* Show a busy sheet while we walk the trees */
+    NSWindow *sheet = [self makeBusySheetWithTitle:@"Calculating size…"
+                                        onWindow:src.window];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSMutableArray<NSNumber *> *sizes = [NSMutableArray arrayWithCapacity:paths.count];
+        for (NSString *p in paths) [sizes addObject:@([self recursiveSizeOfPath:p])];
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [src.window endSheet:sheet];
+            [self showInfoAlertWithPaths:paths names:names sizes:sizes];
+        });
+    });
+}
+
+- (void)showInfoAlertWithPaths:(NSArray<NSString *> *)paths
+                         names:(NSArray<NSString *> *)names
+                         sizes:(NSArray<NSNumber *> *)precomputedSizes {
     NSAlert *alert = [[NSAlert alloc] init];
 
     if (paths.count == 1) {
         alert.messageText = [NSString stringWithFormat:@"Info — %@", names[0]];
-        alert.informativeText = [self infoTextForPath:paths[0]];
+        NSString *baseInfo = [self infoTextForPath:paths[0]];
+        if (precomputedSizes.count == 1) {
+            uint64_t sz = precomputedSizes[0].unsignedLongLongValue;
+            char szBuf[32]; pal_format_size(sz, szBuf, sizeof(szBuf));
+            baseInfo = [baseInfo stringByAppendingFormat:
+                @"\nRecursive:   %s (%llu bytes)", szBuf, (unsigned long long)sz];
+        }
+        alert.informativeText = baseInfo;
     } else {
         uint64_t totalBytes = 0;
         int files = 0, dirs = 0, other = 0;
-        for (NSString *p in paths) {
+        for (NSUInteger i = 0; i < paths.count; i++) {
+            NSString *p = paths[i];
             struct stat st;
             if (lstat(p.fileSystemRepresentation, &st) != 0) { other++; continue; }
             if (S_ISDIR(st.st_mode))      dirs++;
             else if (S_ISREG(st.st_mode)) files++;
             else                          other++;
-            totalBytes += (uint64_t)st.st_size;
+
+            if (precomputedSizes && i < precomputedSizes.count) {
+                totalBytes += precomputedSizes[i].unsignedLongLongValue;
+            } else {
+                totalBytes += (uint64_t)st.st_size;
+            }
         }
         char sizeBuf[32];
         pal_format_size(totalBytes, sizeBuf, sizeof(sizeBuf));
         alert.messageText = [NSString stringWithFormat:@"Info — %lu items selected",
                              (unsigned long)paths.count];
         alert.informativeText = [NSString stringWithFormat:
-            @"%d file%@, %d director%@%@\nTotal size: %s",
+            @"%d file%@, %d director%@%@\nTotal size (recursive): %s",
             files, files == 1 ? @"" : @"s",
             dirs,  dirs  == 1 ? @"y" : @"ies",
             other ? [NSString stringWithFormat:@", %d other", other] : @"",
@@ -2340,6 +2384,61 @@ typedef NS_ENUM(NSInteger, ListerState) {
 
     [alert addButtonWithTitle:@"OK"];
     [alert runModal];
+}
+
+/* Walk a path and return total byte count. For files, returns file size.
+ * For directories, recursively sums all contained files. Symlinks not
+ * followed. Runs on the calling thread; call from a background queue. */
+- (uint64_t)recursiveSizeOfPath:(NSString *)path {
+    struct stat st;
+    if (lstat(path.fileSystemRepresentation, &st) != 0) return 0;
+    if (!S_ISDIR(st.st_mode)) return (uint64_t)st.st_size;
+
+    uint64_t total = 0;
+    NSDirectoryEnumerator *en = [[NSFileManager defaultManager]
+        enumeratorAtURL:[NSURL fileURLWithPath:path]
+        includingPropertiesForKeys:@[NSURLFileSizeKey, NSURLIsRegularFileKey]
+        options:NSDirectoryEnumerationSkipsHiddenFiles
+        errorHandler:nil];
+    for (NSURL *u in en) {
+        NSNumber *reg = nil;
+        [u getResourceValue:&reg forKey:NSURLIsRegularFileKey error:nil];
+        if (!reg.boolValue) continue;
+        NSNumber *sz = nil;
+        [u getResourceValue:&sz forKey:NSURLFileSizeKey error:nil];
+        total += sz.unsignedLongLongValue;
+    }
+    return total;
+}
+
+- (NSWindow *)makeBusySheetWithTitle:(NSString *)title onWindow:(NSWindow *)parent {
+    NSWindow *w = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 320, 100)
+                                              styleMask:NSWindowStyleMaskTitled
+                                                backing:NSBackingStoreBuffered
+                                                  defer:NO];
+    NSView *c = w.contentView;
+    NSTextField *lbl = [NSTextField labelWithString:title];
+    lbl.font = [NSFont boldSystemFontOfSize:13];
+    lbl.alignment = NSTextAlignmentCenter;
+    lbl.translatesAutoresizingMaskIntoConstraints = NO;
+    [c addSubview:lbl];
+
+    NSProgressIndicator *spinner = [[NSProgressIndicator alloc] init];
+    spinner.style = NSProgressIndicatorStyleSpinning;
+    spinner.translatesAutoresizingMaskIntoConstraints = NO;
+    [spinner startAnimation:nil];
+    [c addSubview:spinner];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [lbl.centerXAnchor constraintEqualToAnchor:c.centerXAnchor],
+        [lbl.topAnchor constraintEqualToAnchor:c.topAnchor constant:18],
+        [spinner.centerXAnchor constraintEqualToAnchor:c.centerXAnchor],
+        [spinner.topAnchor constraintEqualToAnchor:lbl.bottomAnchor constant:10],
+        [spinner.widthAnchor constraintEqualToConstant:24],
+        [spinner.heightAnchor constraintEqualToConstant:24],
+    ]];
+    [parent beginSheet:w completionHandler:nil];
+    return w;
 }
 
 /* Filter — DOpus Show/Hide pattern. Scope: active source Lister.
