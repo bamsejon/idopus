@@ -520,11 +520,16 @@ typedef NS_ENUM(NSInteger, ListerState) {
 
     /* Right-click context menu — items route to appDelegate actions */
     NSMenu *menu = [[NSMenu alloc] init];
-    menu.delegate = self;    /* rebuild Open With dynamically per clicked row */
+    menu.delegate = self;    /* rebuild Open With / Extract dynamically per clicked row */
     [menu addItemWithTitle:@"Open"           action:@selector(openSelectionAction:) keyEquivalent:@""].target = self;
     NSMenuItem *openWith = [menu addItemWithTitle:@"Open With" action:NULL keyEquivalent:@""];
     openWith.submenu = [[NSMenu alloc] initWithTitle:@"Open With"];
     [menu addItemWithTitle:@"Reveal in Finder" action:@selector(revealInFinderAction:) keyEquivalent:@""].target = self;
+    [menu addItem:[NSMenuItem separatorItem]];
+    [menu addItemWithTitle:@"Compress"       action:@selector(compressAction:)  keyEquivalent:@""].target = self;
+    NSMenuItem *extract = [menu addItemWithTitle:@"Extract" action:@selector(extractAction:) keyEquivalent:@""];
+    extract.target = self;
+    extract.tag = 1;  /* identify for menuNeedsUpdate */
     [menu addItem:[NSMenuItem separatorItem]];
     [menu addItemWithTitle:@"Info"           action:@selector(infoAction:)    keyEquivalent:@""].target = _appDelegate;
     [menu addItemWithTitle:@"Rename…"        action:@selector(renameAction:)  keyEquivalent:@""].target = _appDelegate;
@@ -759,16 +764,24 @@ typedef NS_ENUM(NSInteger, ListerState) {
     }
 }
 
-/* Rebuild Open With submenu based on the right-clicked (or selected) row */
+/* Rebuild Open With + Extract based on the right-clicked (or selected) row */
 - (void)menuNeedsUpdate:(NSMenu *)menu {
     if (menu != _tableView.menu) return;
     NSMenuItem *openWithItem = nil;
+    NSMenuItem *extractItem = nil;
     for (NSMenuItem *it in menu.itemArray) {
-        if ([it.title isEqualToString:@"Open With"]) { openWithItem = it; break; }
+        if ([it.title isEqualToString:@"Open With"]) openWithItem = it;
+        if (it.tag == 1 && [it.title isEqualToString:@"Extract"]) extractItem = it;
     }
-    if (!openWithItem) return;
 
     NSString *path = [self pathForContextClick];
+
+    /* Extract: visible only when the clicked file is a recognised archive */
+    if (extractItem) {
+        extractItem.hidden = !(path && [self pathIsArchive:path]);
+    }
+
+    if (!openWithItem) return;
     NSMenu *sub = openWithItem.submenu;
     [sub removeAllItems];
 
@@ -821,6 +834,149 @@ typedef NS_ENUM(NSInteger, ListerState) {
                        withApplicationAtURL:appURL
                               configuration:cfg
                           completionHandler:nil];
+}
+
+- (BOOL)pathIsArchive:(NSString *)path {
+    NSString *lower = path.lowercaseString;
+    return [lower hasSuffix:@".zip"] || [lower hasSuffix:@".tar"] ||
+           [lower hasSuffix:@".tar.gz"] || [lower hasSuffix:@".tgz"] ||
+           [lower hasSuffix:@".gz"];
+}
+
+/* Compress selected items to a single .zip next to them. Uses /usr/bin/ditto
+ * which preserves macOS metadata and resource forks. */
+- (void)compressAction:(id)sender {
+    NSArray<NSString *> *paths = [self selectedPaths];
+    NSArray<NSString *> *names = [self selectedNames];
+    if (paths.count == 0) {
+        NSString *clickPath = [self pathForContextClick];
+        if (!clickPath) return;
+        paths = @[clickPath];
+        names = @[clickPath.lastPathComponent];
+    }
+
+    NSString *archiveName = paths.count == 1
+        ? [NSString stringWithFormat:@"%@.zip", names[0]]
+        : @"Archive.zip";
+    NSString *dest = [_currentPath stringByAppendingPathComponent:archiveName];
+    dest = [self uniqueDestinationPath:dest];
+
+    NSMutableArray *args = [NSMutableArray arrayWithObjects:@"-c", @"-k",
+                            @"--sequesterRsrc", @"--keepParent", nil];
+    for (NSString *p in paths) [args addObject:p];
+    [args addObject:dest];
+
+    __weak typeof(self) weakSelf = self;
+    [self runTaskAsync:@"/usr/bin/ditto" args:args title:@"Compressing…"
+            completion:^(int status, NSString *stderrOut) {
+        typeof(self) s = weakSelf; if (!s) return;
+        if (status == 0) [s.appDelegate refreshAllListersShowing:s.currentPath];
+        else [s.appDelegate showAlert:@"Compress failed"
+                                 info:stderrOut ?: @"ditto returned a non-zero status"
+                                style:NSAlertStyleWarning];
+    }];
+}
+
+- (void)extractAction:(id)sender {
+    NSString *path = [self pathForContextClick];
+    if (!path) {
+        NSArray *sel = [self selectedPaths];
+        if (sel.count == 1) path = sel.firstObject;
+    }
+    if (!path) return;
+
+    NSString *base = [path.lastPathComponent stringByDeletingPathExtension];
+    /* Handle .tar.gz → base loses .tar too */
+    if ([base.pathExtension.lowercaseString isEqualToString:@"tar"]) {
+        base = [base stringByDeletingPathExtension];
+    }
+    NSString *destDir = [_currentPath stringByAppendingPathComponent:base];
+    destDir = [self uniqueDestinationPath:destDir];
+
+    NSError *mkErr = nil;
+    if (![[NSFileManager defaultManager] createDirectoryAtPath:destDir
+                                   withIntermediateDirectories:YES
+                                                    attributes:nil
+                                                         error:&mkErr]) {
+        [self.appDelegate showAlert:@"Extract failed"
+                               info:mkErr.localizedDescription
+                              style:NSAlertStyleWarning];
+        return;
+    }
+
+    NSString *launch;
+    NSArray *args;
+    NSString *lower = path.lowercaseString;
+    if ([lower hasSuffix:@".zip"]) {
+        launch = @"/usr/bin/ditto";
+        args = @[@"-x", @"-k", path, destDir];
+    } else if ([lower hasSuffix:@".tar.gz"] || [lower hasSuffix:@".tgz"]) {
+        launch = @"/usr/bin/tar";
+        args = @[@"-xzf", path, @"-C", destDir];
+    } else if ([lower hasSuffix:@".tar"]) {
+        launch = @"/usr/bin/tar";
+        args = @[@"-xf", path, @"-C", destDir];
+    } else if ([lower hasSuffix:@".gz"]) {
+        launch = @"/usr/bin/gunzip";
+        args = @[@"-k", path];   /* extracts next to original, keeps source */
+        destDir = _currentPath;
+    } else {
+        [self.appDelegate showAlert:@"Extract" info:@"Unsupported archive format."
+                              style:NSAlertStyleInformational];
+        return;
+    }
+
+    __weak typeof(self) weakSelf = self;
+    [self runTaskAsync:launch args:args title:@"Extracting…"
+            completion:^(int status, NSString *stderrOut) {
+        typeof(self) s = weakSelf; if (!s) return;
+        if (status == 0) [s.appDelegate refreshAllListersShowing:s.currentPath];
+        else [s.appDelegate showAlert:@"Extract failed"
+                                 info:stderrOut ?: @"command returned a non-zero status"
+                                style:NSAlertStyleWarning];
+    }];
+}
+
+- (NSString *)uniqueDestinationPath:(NSString *)path {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    if (![fm fileExistsAtPath:path]) return path;
+    NSString *dir = [path stringByDeletingLastPathComponent];
+    NSString *name = [path.lastPathComponent stringByDeletingPathExtension];
+    NSString *ext = path.pathExtension;
+    for (int i = 2; i < 1000; i++) {
+        NSString *try = ext.length
+            ? [NSString stringWithFormat:@"%@/%@ %d.%@", dir, name, i, ext]
+            : [NSString stringWithFormat:@"%@/%@ %d",   dir, name, i];
+        if (![fm fileExistsAtPath:try]) return try;
+    }
+    return path;
+}
+
+- (void)runTaskAsync:(NSString *)launchPath
+                args:(NSArray<NSString *> *)args
+               title:(NSString *)title
+          completion:(void (^)(int status, NSString *stderr))completion {
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSTask *task = [[NSTask alloc] init];
+        task.executableURL = [NSURL fileURLWithPath:launchPath];
+        task.arguments = args;
+        NSPipe *errPipe = [NSPipe pipe];
+        task.standardError = errPipe;
+        NSError *launchErr = nil;
+        NSString *errOut = nil;
+        int status = -1;
+        if ([task launchAndReturnError:&launchErr]) {
+            [task waitUntilExit];
+            status = task.terminationStatus;
+            NSData *d = [errPipe.fileHandleForReading readDataToEndOfFile];
+            if (d.length) errOut = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+        } else {
+            errOut = launchErr.localizedDescription;
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (completion) completion(status, errOut);
+        });
+    });
 }
 
 - (void)openWithOtherAction:(NSMenuItem *)sender {
