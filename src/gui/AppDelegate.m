@@ -571,7 +571,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
                                                     defer:NO];
     panel.title = @"Buttons";
     panel.floatingPanel = YES;
-    panel.hidesOnDeactivate = NO;
+    panel.hidesOnDeactivate = YES;   /* only float while iDOpus is the active app */
     panel.level = NSFloatingWindowLevel;
     panel.becomesKeyOnlyIfNeeded = YES;
     panel.contentMinSize = NSMakeSize(70, 200);
