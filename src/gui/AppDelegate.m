@@ -56,6 +56,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
 - (void)filterAction:(id)sender;
 - (void)toggleHidden:(id)sender;
 - (void)toggleButtonBank:(id)sender;
+- (void)selectPatternAction:(id)sender;
 @end
 
 #pragma mark - Lister Table Data
@@ -370,6 +371,17 @@ typedef NS_ENUM(NSInteger, ListerState) {
     _dataSource.tableView = _tableView;
     _dataSource.owner = self;
 
+    /* Right-click context menu — items route to appDelegate actions */
+    NSMenu *menu = [[NSMenu alloc] init];
+    [menu addItemWithTitle:@"Open"           action:@selector(openSelectionAction:) keyEquivalent:@""].target = self;
+    [menu addItemWithTitle:@"Reveal in Finder" action:@selector(revealInFinderAction:) keyEquivalent:@""].target = self;
+    [menu addItem:[NSMenuItem separatorItem]];
+    [menu addItemWithTitle:@"Info"           action:@selector(infoAction:)    keyEquivalent:@""].target = _appDelegate;
+    [menu addItemWithTitle:@"Rename…"        action:@selector(renameAction:)  keyEquivalent:@""].target = _appDelegate;
+    [menu addItem:[NSMenuItem separatorItem]];
+    [menu addItemWithTitle:@"Move to Trash"  action:@selector(deleteAction:)  keyEquivalent:@""].target = _appDelegate;
+    _tableView.menu = menu;
+
     /* Drag-and-drop — accept file URLs from anywhere (other Listers or Finder) */
     [_tableView registerForDraggedTypes:@[NSPasteboardTypeFileURL]];
     [_tableView setDraggingSourceOperationMask:NSDragOperationCopy | NSDragOperationMove
@@ -532,6 +544,65 @@ typedef NS_ENUM(NSInteger, ListerState) {
 
 - (void)deselectAllFiles:(id)sender {
     [_tableView deselectAll:nil];
+}
+
+/* Open: double-click behavior for the clicked row (or every selected row). */
+- (void)openSelectionAction:(id)sender {
+    NSInteger row = _tableView.clickedRow >= 0
+                    ? _tableView.clickedRow
+                    : _tableView.selectedRow;
+    if (row < 0) return;
+
+    dir_entry_t *entry = dir_buffer_get_entry(_dataSource.buffer, (int)row);
+    if (!entry) return;
+    char fullpath[4096];
+    pal_path_join([_currentPath fileSystemRepresentation],
+                  entry->name, fullpath, sizeof(fullpath));
+    NSURL *url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:fullpath]];
+    if (dir_entry_is_dir(entry)) {
+        [self loadPath:url.path];
+    } else {
+        [[NSWorkspace sharedWorkspace] openURL:url];
+    }
+}
+
+- (void)revealInFinderAction:(id)sender {
+    NSArray<NSString *> *paths = [self selectedPaths];
+    if (paths.count == 0) {
+        /* Fall back to clicked row if context menu triggered without selection */
+        NSInteger row = _tableView.clickedRow;
+        if (row >= 0) {
+            dir_entry_t *e = dir_buffer_get_entry(_dataSource.buffer, (int)row);
+            if (e && e->name) {
+                char full[4096];
+                pal_path_join([_currentPath fileSystemRepresentation], e->name, full, sizeof(full));
+                paths = @[[NSString stringWithUTF8String:full]];
+            }
+        }
+    }
+    if (paths.count == 0) {
+        [[NSWorkspace sharedWorkspace] openURL:[NSURL fileURLWithPath:_currentPath]];
+        return;
+    }
+    NSMutableArray<NSURL *> *urls = [NSMutableArray arrayWithCapacity:paths.count];
+    for (NSString *p in paths) [urls addObject:[NSURL fileURLWithPath:p]];
+    [[NSWorkspace sharedWorkspace] activateFileViewerSelectingURLs:urls];
+}
+
+- (void)selectByPattern:(NSString *)pattern {
+    if (!_dataSource.buffer || !pattern.length) return;
+    NSMutableIndexSet *idx = [NSMutableIndexSet indexSet];
+    int total = _dataSource.buffer->stats.total_entries;
+    const char *cpat = [pattern UTF8String];
+    for (int i = 0; i < total; i++) {
+        dir_entry_t *e = dir_buffer_get_entry(_dataSource.buffer, i);
+        if (!e || !e->name) continue;
+        if (pal_path_match(cpat, e->name)) [idx addIndex:(NSUInteger)i];
+    }
+    [_tableView selectRowIndexes:idx byExtendingSelection:NO];
+    if (idx.firstIndex != NSNotFound) {
+        [_tableView scrollRowToVisible:(NSInteger)idx.firstIndex];
+    }
 }
 
 - (void)pathFieldAction:(NSTextField *)sender {
@@ -965,6 +1036,11 @@ typedef NS_ENUM(NSInteger, ListerState) {
                                                  action:@selector(filterAction:)
                                           keyEquivalent:@"f"];
     filterItem.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
+
+    NSMenuItem *selectItem = [funcMenu addItemWithTitle:@"Select By Pattern…"
+                                                 action:@selector(selectPatternAction:)
+                                          keyEquivalent:@"a"];
+    selectItem.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
     funcItem.submenu = funcMenu;
     [mainMenu addItem:funcItem];
 
@@ -1188,6 +1264,28 @@ typedef NS_ENUM(NSInteger, ListerState) {
     ds.hideDotfiles = dotBox.state == NSControlStateValueOn;
     [ds applyCurrentFilter];
     [src updateStatusBar];
+}
+
+- (void)selectPatternAction:(id)sender {
+    ListerWindowController *src = [self sourceOrOperating];
+    if (!src) return;
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Select By Pattern";
+    alert.informativeText = @"Glob (e.g. *.txt, img_*.jpg). Empty = no-op.";
+
+    NSTextField *input = [[NSTextField alloc] initWithFrame:NSMakeRect(0, 0, 300, 24)];
+    input.stringValue = @"*";
+    alert.accessoryView = input;
+    [alert addButtonWithTitle:@"Select"];
+    [alert addButtonWithTitle:@"Cancel"];
+    [alert.window setInitialFirstResponder:input];
+    [input selectText:nil];
+
+    if ([alert runModal] != NSAlertFirstButtonReturn) return;
+    NSString *pattern = [input.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    if (pattern.length == 0) return;
+    [src selectByPattern:pattern];
 }
 
 - (void)toggleHidden:(id)sender {
