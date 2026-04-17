@@ -1445,6 +1445,37 @@ typedef NS_ENUM(NSInteger, ListerState) {
     _titleLabel.stringValue = @"Cancelling…";
 }
 
+/* Returns: 1=Replace, 2=Skip, 3=Keep Both, 4=Cancel-all.
+ * If the "Apply to all remaining" checkbox is on, writes the choice into
+ * applyAll so subsequent conflicts use it without prompting. */
+- (int)askReplaceSkipKeepBothFor:(NSString *)name applyAll:(int *)applyAll {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = [NSString stringWithFormat:@"\"%@\" already exists", name];
+    alert.informativeText = @"Choose how to handle this conflict.";
+    alert.alertStyle = NSAlertStyleWarning;
+    [alert addButtonWithTitle:@"Replace"];
+    [alert addButtonWithTitle:@"Skip"];
+    [alert addButtonWithTitle:@"Keep Both"];
+    [alert addButtonWithTitle:@"Cancel All"];
+
+    NSButton *applyToAll = [NSButton checkboxWithTitle:@"Apply to all remaining conflicts"
+                                                target:nil action:nil];
+    applyToAll.frame = NSMakeRect(0, 0, 300, 20);
+    alert.accessoryView = applyToAll;
+
+    NSModalResponse r = [alert runModal];
+    int choice = 2;  /* default skip */
+    if      (r == NSAlertFirstButtonReturn)        choice = 1;  /* Replace */
+    else if (r == NSAlertSecondButtonReturn)       choice = 2;  /* Skip */
+    else if (r == NSAlertThirdButtonReturn)        choice = 3;  /* Keep Both */
+    else if (r == NSAlertThirdButtonReturn + 1)    choice = 4;  /* Cancel All */
+
+    if (applyToAll.state == NSControlStateValueOn && choice != 4) {
+        *applyAll = choice;
+    }
+    return choice;
+}
+
 - (void)runOperation:(BOOL)isMove
                paths:(NSArray<NSString *> *)paths
                names:(NSArray<NSString *> *)names
@@ -1461,6 +1492,11 @@ typedef NS_ENUM(NSInteger, ListerState) {
         NSFileManager *fm = [NSFileManager defaultManager];
         NSMutableArray<NSString *> *failed = [NSMutableArray array];
 
+        /* Conflict resolution strategy for this run. Initially "ask";
+         * once the user picks "apply to all" we switch to the chosen
+         * non-interactive mode. */
+        __block int applyAll = 0;  /* 0=ask, 1=replace, 2=skip, 3=keepBoth */
+
         for (NSUInteger i = 0; i < paths.count; i++) {
             if (self.cancelled) break;
 
@@ -1474,6 +1510,39 @@ typedef NS_ENUM(NSInteger, ListerState) {
 
             NSString *from = paths[i];
             NSString *to = [destDir stringByAppendingPathComponent:name];
+
+            /* Conflict: target already exists → ask unless apply-all is set */
+            if ([fm fileExistsAtPath:to]) {
+                __block int choice = applyAll;
+                if (choice == 0) {
+                    dispatch_sync(dispatch_get_main_queue(), ^{
+                        choice = [self askReplaceSkipKeepBothFor:name applyAll:&applyAll];
+                    });
+                }
+                if (choice == 2) continue;   /* skip */
+                if (choice == 4) { self.cancelled = YES; break; }  /* cancel all */
+                if (choice == 3) {
+                    /* Keep both: resolve to a unique name */
+                    NSString *base = [name stringByDeletingPathExtension];
+                    NSString *ext = name.pathExtension;
+                    for (int n = 2; n < 1000; n++) {
+                        NSString *alt = ext.length
+                            ? [NSString stringWithFormat:@"%@ %d.%@", base, n, ext]
+                            : [NSString stringWithFormat:@"%@ %d", base, n];
+                        NSString *altPath = [destDir stringByAppendingPathComponent:alt];
+                        if (![fm fileExistsAtPath:altPath]) { to = altPath; break; }
+                    }
+                } else if (choice == 1) {
+                    /* Replace: remove existing first */
+                    NSError *rmErr = nil;
+                    if (![fm removeItemAtPath:to error:&rmErr]) {
+                        [failed addObject:[NSString stringWithFormat:@"%@: %@ (replace)",
+                                           name, rmErr.localizedDescription]];
+                        continue;
+                    }
+                }
+            }
+
             NSError *err = nil;
             BOOL ok = isMove
                 ? [fm moveItemAtPath:from toPath:to error:&err]
