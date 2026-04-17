@@ -543,15 +543,23 @@ typedef NS_ENUM(NSInteger, ListerState) {
 
     [self createMainMenu];
 
-    /* Default: open first Lister centered, sized so a Split Display produces
-     * two comfortably-usable halves above autolayout minimum. */
+    /* Default layout: two tiled Listers side-by-side, matching classic DOpus
+     * dual-pane presentation. Right Lister becomes SOURCE (opened last),
+     * left becomes DEST. */
     NSRect screen = [[NSScreen mainScreen] visibleFrame];
     CGFloat w = MIN(1400, screen.size.width - 100);
     CGFloat h = MIN(800,  screen.size.height - 100);
-    NSRect frame = NSMakeRect(screen.origin.x + (screen.size.width  - w) / 2,
-                              screen.origin.y + (screen.size.height - h) / 2,
-                              w, h);
-    [self newListerWindow:NSHomeDirectory() frame:frame];
+    CGFloat x = screen.origin.x + (screen.size.width  - w) / 2;
+    CGFloat y = screen.origin.y + (screen.size.height - h) / 2;
+    CGFloat halfW = floor(w / 2);
+
+    NSRect leftFrame  = NSMakeRect(x,         y, halfW,     h);
+    NSRect rightFrame = NSMakeRect(x + halfW, y, w - halfW, h);
+
+    ListerWindowController *left  = [self newListerWindow:NSHomeDirectory() frame:leftFrame];
+    ListerWindowController *right = [self newListerWindow:NSHomeDirectory() frame:rightFrame];
+    [left.window setFrame:leftFrame display:YES animate:NO];
+    [right.window setFrame:rightFrame display:YES animate:NO];
 }
 
 - (void)applicationWillTerminate:(NSNotification *)notification {
