@@ -430,6 +430,10 @@ typedef NS_ENUM(NSInteger, ListerState) {
                                                         defer:NO];
     window.title = @"iDOpus";
     window.minSize = NSMakeSize(400, 300);
+    /* Unique tabbingIdentifier so this Lister isn't auto-merged with sibling
+     * Listers at startup (user may have "Prefer Tabs: Always" set). Explicit
+     * New Tab still works via addTabbedWindow:. */
+    window.tabbingIdentifier = [NSString stringWithFormat:@"idopus-lister-%p", (void *)window];
 
     self = [super initWithWindow:window];
     if (!self) return nil;
@@ -1523,6 +1527,9 @@ typedef NS_ENUM(NSInteger, ListerState) {
                                                   action:@selector(newFileAction:)
                                            keyEquivalent:@"n"];
     newFileMenu.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagOption;
+    [fileMenu addItemWithTitle:@"New Tab"
+                        action:@selector(newTabAction:)
+                 keyEquivalent:@"t"];
     NSMenuItem *splitItem = [fileMenu addItemWithTitle:@"Split Display"
                                                 action:@selector(splitDisplayAction:)
                                          keyEquivalent:@"N"];
@@ -1586,6 +1593,22 @@ typedef NS_ENUM(NSInteger, ListerState) {
     NSString *key = [NSString stringWithCharacters:&fkey length:1];
     NSMenuItem *item = [menu addItemWithTitle:title action:action keyEquivalent:key];
     item.keyEquivalentModifierMask = 0;  /* bare F-key, matching DOpus */
+}
+
+/* New Tab: open another Lister at the current source's path and attach it
+ * as a native macOS window tab to the current window. Falls back to a
+ * standalone window if there's no key Lister to attach to. */
+- (void)newTabAction:(id)sender {
+    ListerWindowController *current = (ListerWindowController *)[NSApp keyWindow].windowController;
+    if (![current isKindOfClass:[ListerWindowController class]]) {
+        current = _activeSource ?: _listerControllers.lastObject;
+    }
+    if (!current) { [self newListerAction:sender]; return; }
+
+    ListerWindowController *newCtrl = [self newListerWindow:current.currentPath
+                                                      frame:current.window.frame];
+    [current.window addTabbedWindow:newCtrl.window ordered:NSWindowAbove];
+    [newCtrl.window makeKeyAndOrderFront:nil];
 }
 
 - (void)newListerAction:(id)sender {
