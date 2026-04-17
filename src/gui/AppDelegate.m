@@ -190,6 +190,22 @@ typedef NS_ENUM(NSInteger, ListerState) {
 
 @class ListerDataSource;
 
+/* Forward-declared: used inside ListerWindowController before its own
+ * @implementation. Full @interface + @implementation follow below. */
+@interface ProgressSheetController : NSWindowController
+@property (nonatomic, strong) NSTextField *titleLabel;
+@property (nonatomic, strong) NSTextField *fileLabel;
+@property (nonatomic, strong) NSProgressIndicator *spinner;
+@property (nonatomic, strong) NSButton *cancelButton;
+@property (atomic, assign) BOOL cancelled;
+- (void)runOperation:(BOOL)isMove
+               paths:(NSArray<NSString *> *)paths
+               names:(NSArray<NSString *> *)names
+              destDir:(NSString *)destDir
+          sourceWindow:(NSWindow *)srcWin
+           completion:(void (^)(NSArray<NSString *> *failed))completion;
+@end
+
 @interface ListerWindowController : NSWindowController <NSWindowDelegate, QLPreviewPanelDataSource, QLPreviewPanelDelegate, NSMenuDelegate, NSSearchFieldDelegate>
 @property (nonatomic, strong) ListerDataSource *dataSource;
 @property (nonatomic, strong) NSTableView *tableView;
@@ -669,6 +685,9 @@ typedef NS_ENUM(NSInteger, ListerState) {
     [menu addItemWithTitle:@"Open in Terminal" action:@selector(openInTerminalAction:) keyEquivalent:@""].target = self;
     [menu addItemWithTitle:@"Copy Path"       action:@selector(copyPathAction:) keyEquivalent:@""].target = self;
     [menu addItem:[NSMenuItem separatorItem]];
+    [menu addItemWithTitle:@"Copy to…"        action:@selector(copyToAction:) keyEquivalent:@""].target = self;
+    [menu addItemWithTitle:@"Move to…"        action:@selector(moveToAction:) keyEquivalent:@""].target = self;
+    [menu addItem:[NSMenuItem separatorItem]];
     [menu addItemWithTitle:@"Duplicate"       action:@selector(duplicateAction:) keyEquivalent:@""].target = self;
     [menu addItemWithTitle:@"Compress"       action:@selector(compressAction:)  keyEquivalent:@""].target = self;
     NSMenuItem *extract = [menu addItemWithTitle:@"Extract" action:@selector(extractAction:) keyEquivalent:@""];
@@ -1131,6 +1150,89 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     [pb setString:joined forType:NSPasteboardTypeString];
 }
 
+- (void)copyToAction:(id)sender { [self copyOrMoveToDialog:NO]; }
+- (void)moveToAction:(id)sender { [self copyOrMoveToDialog:YES]; }
+
+/* Prompt for a destination directory via NSOpenPanel, then copy/move the
+ * current selection there. Works without a second Lister open. */
+- (void)copyOrMoveToDialog:(BOOL)isMove {
+    NSArray<NSString *> *paths = [self selectedPaths];
+    if (paths.count == 0) {
+        NSString *clickPath = [self pathForContextClick];
+        if (clickPath) paths = @[clickPath];
+    }
+    if (paths.count == 0) return;
+
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.canChooseFiles = NO;
+    panel.canChooseDirectories = YES;
+    panel.allowsMultipleSelection = NO;
+    panel.canCreateDirectories = YES;
+    panel.prompt = isMove ? @"Move Here" : @"Copy Here";
+    panel.message = isMove
+        ? [NSString stringWithFormat:@"Choose destination to move %lu item%@ to",
+           (unsigned long)paths.count, paths.count == 1 ? @"" : @"s"]
+        : [NSString stringWithFormat:@"Choose destination to copy %lu item%@ to",
+           (unsigned long)paths.count, paths.count == 1 ? @"" : @"s"];
+    panel.directoryURL = [NSURL fileURLWithPath:_currentPath];
+
+    if ([panel runModal] != NSModalResponseOK || !panel.URL) return;
+    if ([panel.URL.path isEqualToString:_currentPath]) {
+        [self.appDelegate showAlert:isMove ? @"Move to…" : @"Copy to…"
+                               info:@"Source and destination are the same directory."
+                              style:NSAlertStyleInformational];
+        return;
+    }
+
+    /* Build URL array so we can reuse performDropOntoLister: — it already
+     * wires ProgressSheetController + source/dest refresh + conflict prompts. */
+    NSMutableArray<NSURL *> *urls = [NSMutableArray arrayWithCapacity:paths.count];
+    for (NSString *p in paths) [urls addObject:[NSURL fileURLWithPath:p]];
+
+    /* Find any existing Lister at the destination (so it refreshes), else
+     * synthesize a transient one just for the op's bookkeeping. */
+    ListerWindowController *destLister = nil;
+    for (ListerWindowController *lw in self.appDelegate.listerControllers) {
+        if ([lw.currentPath isEqualToString:panel.URL.path]) { destLister = lw; break; }
+    }
+
+    if (destLister) {
+        [self.appDelegate performDropOntoLister:destLister fromURLs:urls asMove:isMove];
+    } else {
+        /* Drop onto the source Lister — it's just used for the progress
+         * sheet's parent window. The destination directory is the panel's
+         * URL, not the lister's currentPath, so we inline the op here. */
+        [self runToPanelOp:isMove urls:urls destDir:panel.URL.path];
+    }
+}
+
+- (void)runToPanelOp:(BOOL)isMove urls:(NSArray<NSURL *> *)urls destDir:(NSString *)destDir {
+    NSMutableArray<NSString *> *paths = [NSMutableArray arrayWithCapacity:urls.count];
+    NSMutableArray<NSString *> *names = [NSMutableArray arrayWithCapacity:urls.count];
+    for (NSURL *u in urls) { [paths addObject:u.path]; [names addObject:u.lastPathComponent]; }
+
+    IDOpusAppDelegate *app = self.appDelegate;
+    NSString *sourceParent = [urls.firstObject.path stringByDeletingLastPathComponent];
+
+    ProgressSheetController *sheet = [[ProgressSheetController alloc] init];
+    __block ProgressSheetController *keepAlive = sheet;
+    [sheet runOperation:isMove
+                  paths:paths
+                  names:names
+                destDir:destDir
+           sourceWindow:self.window
+             completion:^(NSArray<NSString *> *failed) {
+        [app refreshAllListersShowing:destDir];
+        if (isMove) [app refreshAllListersShowing:sourceParent];
+        if (failed.count > 0) {
+            [app showAlert:isMove ? @"Some items could not be moved" : @"Some items could not be copied"
+                      info:[failed componentsJoinedByString:@"\n"]
+                     style:NSAlertStyleWarning];
+        }
+        keepAlive = nil;
+    }];
+}
+
 - (void)duplicateAction:(id)sender {
     NSArray<NSString *> *paths = [self selectedPaths];
     NSArray<NSString *> *names = [self selectedNames];
@@ -1495,22 +1597,8 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
 
 /* Modal sheet attached to the source Lister, shown during long copy/move
  * operations. Loop runs on a background queue; label and cancel button are
- * updated/checked on the main queue. */
-@interface ProgressSheetController : NSWindowController
-@property (nonatomic, strong) NSTextField *titleLabel;
-@property (nonatomic, strong) NSTextField *fileLabel;
-@property (nonatomic, strong) NSProgressIndicator *spinner;
-@property (nonatomic, strong) NSButton *cancelButton;
-@property (atomic, assign) BOOL cancelled;
-
-- (void)runOperation:(BOOL)isMove
-               paths:(NSArray<NSString *> *)paths
-               names:(NSArray<NSString *> *)names
-              destDir:(NSString *)destDir
-          sourceWindow:(NSWindow *)srcWin
-           completion:(void (^)(NSArray<NSString *> *failed))completion;
-@end
-
+ * updated/checked on the main queue. @interface is declared above so
+ * ListerWindowController can use it. */
 @implementation ProgressSheetController
 
 - (instancetype)init {
