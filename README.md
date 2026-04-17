@@ -2,11 +2,43 @@
 
 **A modern macOS file manager, ported from the legendary Directory Opus 5 Magellan (Amiga, 1995).**
 
-iDOpus is a project to bring the classic dual-pane file manager experience from the Commodore Amiga to modern macOS on Apple Silicon. The original Directory Opus 5 Magellan was released as open source under the AROS Public License in 2012, and this project builds on that codebase.
+iDOpus brings the classic dual-pane file manager experience from the Commodore Amiga to modern macOS on Apple Silicon. The original Directory Opus 5 Magellan was released as open source under the AROS Public License in 2012, and this project builds on that codebase.
+
+![iDOpus screenshot — two Listers with Button Bank between them](docs/screenshot.png)
 
 ## Status
 
-**Early preview.** A working AppKit Lister window (directory listing, sorting, navigation) with source/destination semantics and Split Display, matching the original Amiga model. File operations, toolbar, and configuration are not yet implemented.
+**Working preview.** Dual-pane Listers with classic DOpus source/destination semantics, a Magellan-style Button Bank between them, and the full set of common file operations with per-item progress. See the current feature list below.
+
+Still to come: file type actions, user-configurable Button Bank, built-in viewer, FTP, and the other DOpus modules.
+
+## Features
+
+### Listers
+- Two tiled Listers side-by-side on launch (classic Magellan layout)
+- Each Lister is SOURCE / DEST / OFF (mirrors `LISTERF_SOURCE` / `LISTERF_DEST`). Focusing a Lister promotes it to SOURCE; previous SOURCE demotes to DEST.
+- Columns: Name, Size, Date, Type — click header to sort, click again to reverse
+- `⌘N` new Lister · `⇧⌘N` Split Display (halves the current Lister and opens a second tiled alongside)
+- Navigate: double-click folder, path field, ↑ (parent), ↻ (refresh), or Parent / Root buttons
+
+### File operations
+- `F5` Copy · `F6` Move (source selection → dest Lister's path)
+- `F7` MakeDir · `F8` Delete (to Trash, with confirmation)
+- `F3` Rename · `F9` Info (properties for 1 or N selected items)
+- `⇧⌘F` Filter (Show/Hide glob + hide-dotfiles toggle)
+- `⇧⌘A` Select By Pattern (`*.txt` etc.)
+- Space — Quick Look preview (native macOS QL)
+- Drag-and-drop between Listers (copy; Option = move) — and to/from Finder, Trash, the Dock
+- Right-click any file for context menu (Open, Reveal in Finder, Info, Rename, Trash)
+
+### Button Bank panel
+- Magellan-style floating panel docked in the gap between the two Listers
+- Buttons: Copy · Move · Delete · Rename · MakeDir · Info · Filter · Parent · Root · Refresh · All · None
+- Non-activating: clicking a button does not steal focus from the SOURCE Lister
+- `⌘B` toggle visibility
+
+### Progress
+- Long copy / move operations run on a background queue with a sheet on the source Lister showing *(N/M) filename*, Cancel / Esc aborts, affected Listers auto-refresh
 
 ## Download & install (macOS, Apple Silicon)
 
@@ -19,6 +51,27 @@ iDOpus is a project to bring the classic dual-pane file manager experience from 
    ```
 
 Requires macOS 13 (Ventura) or later on Apple Silicon (M1/M2/M3/M4).
+
+## Keyboard reference
+
+| Key | Action |
+|---|---|
+| `F3` | Rename |
+| `F5` | Copy (source → dest) |
+| `F6` | Move (source → dest) |
+| `F7` | MakeDir |
+| `F8` | Delete (to Trash) |
+| `F9` | Info |
+| `Space` | Quick Look |
+| `⌘N` | New Lister |
+| `⇧⌘N` | Split Display |
+| `⌘W` | Close Lister |
+| `⌘B` | Show/Hide Button Bank |
+| `⌘.` | Toggle hidden files |
+| `⇧⌘F` | Filter… |
+| `⇧⌘A` | Select By Pattern… |
+
+Drag between Listers = copy; hold `⌥` (Option) while dragging = move.
 
 ## Background
 
@@ -36,17 +89,25 @@ The source code is derived from [Directory Opus 5.82 Magellan](https://github.co
 
 "Directory Opus" is a registered trademark of GP Software. The trademark is licensed for use on Amigoid platforms (AROS, AmigaOS, MorphOS) only. This macOS port uses the name **iDOpus** and is not affiliated with or endorsed by GP Software. The commercial [Directory Opus for Windows](https://www.gpsoft.com.au/) (currently v13) is a separate product.
 
-## Architecture (planned)
+## Architecture
 
-| Amiga layer | macOS replacement |
-|---|---|
-| Intuition / BOOPSI GUI | AppKit (NSWindow, NSOutlineView, NSSplitView) |
-| AmigaDOS / dos.library | POSIX / Foundation (NSFileManager) |
-| Exec / message ports | GCD / NSOperationQueue |
-| ARexx scripting | AppleScript / Shortcuts / Lua |
-| IFF/ILBM icons | macOS native icons + UTI |
-| 68K assembler fragments | Removed / rewritten in C or Swift |
-| SAS/C 6 compiler | Clang / Xcode |
+The project is a clean-room port guided by the original source in `original-amiga-source/` — Amiga subsystems are replaced by their macOS equivalents rather than emulated.
+
+| Amiga layer | macOS replacement | Status |
+|---|---|---|
+| `exec.library` (memory, IPC, signals) | `malloc`/GCD/`pthread_mutex` via PAL | ✅ |
+| `dos.library` (file I/O, paths, patterns) | POSIX + Foundation via PAL | ✅ |
+| Intuition / BOOPSI GUI | AppKit (`NSWindow`, `NSTableView`) | ✅ core Lister |
+| DOpus Lister + source/dest model | `ListerWindowController` state | ✅ |
+| DOpus Button Bank | floating non-activating `NSPanel` | ✅ defaults, not yet user-editable |
+| `graphics.library` rendering | CoreGraphics / AppKit drawing | ✅ (via NSTableView) |
+| 68K assembler fragments | Removed / rewritten in C | N/A |
+| SAS/C 6 compiler | Clang / Xcode | ✅ |
+| FileTypes + actions | AppKit + NSWorkspace + Quick Look | ⏳ planned |
+| ARexx scripting | AppleScript bridge / embedded Lua | ⏳ planned |
+| Modules (FTP, viewer, …) | macOS bundles (`.bundle` + dlopen) | ⏳ planned |
+
+See [docs/PORTING_ANALYSIS.md](docs/PORTING_ANALYSIS.md) for a deep analysis of the original codebase and the phased porting plan.
 
 ## Building from source
 
@@ -58,7 +119,14 @@ cmake --build build
 open build/iDOpus.app
 ```
 
-To produce a distributable `.dmg` in `dist/`:
+Run the PAL and core test suites:
+
+```
+./build/pal_test
+./build/core_test
+```
+
+Produce a distributable `.dmg` in `dist/`:
 
 ```
 ./scripts/package.sh
@@ -73,7 +141,7 @@ macOS port and modifications copyright (c) 2026 Jon Bylund.
 
 ## Contributing
 
-This is an early-stage research project. If you're interested in helping port a 30-year-old Amiga file manager to macOS, you're exactly the right kind of person. Open an issue or PR.
+Early-stage port of a 30-year-old Amiga file manager to macOS. If that's your kind of project, pull requests and issues are very welcome.
 
 ## Credits
 
