@@ -9,6 +9,14 @@
 #include "pal/pal_strings.h"
 #include "pal/pal_file.h"
 
+/* --- Lister state (mirrors original LISTERF_SOURCE/LISTERF_DEST) --- */
+
+typedef NS_ENUM(NSInteger, ListerState) {
+    ListerStateOff = 0,
+    ListerStateSource,
+    ListerStateDest,
+};
+
 /* Forward declarations */
 @class ListerWindowController;
 
@@ -17,11 +25,15 @@
 @interface IDOpusAppDelegate : NSObject <NSApplicationDelegate>
 @property (nonatomic) buffer_cache_t *bufferCache;
 @property (nonatomic, strong) NSMutableArray<ListerWindowController *> *listerControllers;
+@property (nonatomic, weak) ListerWindowController *activeSource;
+@property (nonatomic, weak) ListerWindowController *activeDest;
 @end
 
 @interface IDOpusAppDelegate ()
 - (void)createMainMenu;
-- (void)newListerWindow:(NSString *)path;
+- (ListerWindowController *)newListerWindow:(NSString *)path frame:(NSRect)frame;
+- (void)promoteToSource:(ListerWindowController *)ctrl;
+- (void)listerClosing:(ListerWindowController *)ctrl;
 @end
 
 #pragma mark - Lister Table Data
@@ -160,19 +172,21 @@
 
 #pragma mark - Lister Window Controller
 
-@interface ListerWindowController : NSWindowController
+@interface ListerWindowController : NSWindowController <NSWindowDelegate>
 @property (nonatomic, strong) ListerDataSource *dataSource;
 @property (nonatomic, strong) NSTableView *tableView;
 @property (nonatomic, strong) NSTextField *pathField;
-@property (nonatomic, strong) NSTextField *statusBar;
+@property (nonatomic, strong) NSTextField *stateLabel;  /* SOURCE/DEST/OFF */
+@property (nonatomic, strong) NSTextField *statusBar;   /* file/dir counts */
 @property (nonatomic, copy) NSString *currentPath;
+@property (nonatomic, assign) ListerState state;
+@property (nonatomic, weak) IDOpusAppDelegate *appDelegate;
+- (void)setState:(ListerState)state;
 @end
 
 @implementation ListerWindowController
 
-- (instancetype)initWithPath:(NSString *)path {
-    /* Create window */
-    NSRect frame = NSMakeRect(100, 100, 700, 500);
+- (instancetype)initWithPath:(NSString *)path frame:(NSRect)frame appDelegate:(IDOpusAppDelegate *)appDelegate {
     NSWindowStyleMask style = NSWindowStyleMaskTitled |
                                NSWindowStyleMaskClosable |
                                NSWindowStyleMaskMiniaturizable |
@@ -189,9 +203,14 @@
 
     _currentPath = path ?: NSHomeDirectory();
     _dataSource = [[ListerDataSource alloc] init];
+    _appDelegate = appDelegate;
+    _state = ListerStateOff;
+
+    window.delegate = self;
 
     [self setupUI];
     [self loadPath:_currentPath];
+    [self applyStateStyling];
 
     return self;
 }
@@ -256,7 +275,15 @@
     scrollView.documentView = _tableView;
     [content addSubview:scrollView];
 
-    /* Status bar (bottom) */
+    /* State label (bottom-left: SOURCE/DEST/OFF — mirrors original status area) */
+    _stateLabel = [NSTextField labelWithString:@"OFF"];
+    _stateLabel.font = [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightBold];
+    _stateLabel.alignment = NSTextAlignmentCenter;
+    _stateLabel.drawsBackground = YES;
+    _stateLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [content addSubview:_stateLabel];
+
+    /* Status bar (bottom: counts) */
     _statusBar = [NSTextField labelWithString:@""];
     _statusBar.font = [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightRegular];
     _statusBar.textColor = [NSColor secondaryLabelColor];
@@ -282,9 +309,14 @@
         [scrollView.trailingAnchor constraintEqualToAnchor:content.trailingAnchor],
         [scrollView.bottomAnchor constraintEqualToAnchor:_statusBar.topAnchor constant:-4],
 
-        [_statusBar.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:8],
+        [_stateLabel.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:4],
+        [_stateLabel.bottomAnchor constraintEqualToAnchor:content.bottomAnchor constant:-4],
+        [_stateLabel.widthAnchor constraintEqualToConstant:64],
+        [_stateLabel.heightAnchor constraintEqualToConstant:20],
+
+        [_statusBar.leadingAnchor constraintEqualToAnchor:_stateLabel.trailingAnchor constant:8],
         [_statusBar.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-8],
-        [_statusBar.bottomAnchor constraintEqualToAnchor:content.bottomAnchor constant:-6],
+        [_statusBar.centerYAnchor constraintEqualToAnchor:_stateLabel.centerYAnchor],
         [_statusBar.heightAnchor constraintEqualToConstant:18],
     ]];
 
@@ -333,6 +365,50 @@
         [self loadPath:path];
 }
 
+#pragma mark State (SOURCE / DEST / OFF)
+
+- (void)setState:(ListerState)state {
+    if (_state == state) return;
+    _state = state;
+    [self applyStateStyling];
+}
+
+- (void)applyStateStyling {
+    NSString *text;
+    NSColor *fg, *bg;
+    switch (_state) {
+        case ListerStateSource:
+            text = @"SOURCE";
+            fg = [NSColor whiteColor];
+            bg = [NSColor systemBlueColor];
+            break;
+        case ListerStateDest:
+            text = @"DEST";
+            fg = [NSColor whiteColor];
+            bg = [NSColor systemOrangeColor];
+            break;
+        case ListerStateOff:
+        default:
+            text = @"OFF";
+            fg = [NSColor secondaryLabelColor];
+            bg = [NSColor clearColor];
+            break;
+    }
+    _stateLabel.stringValue = text;
+    _stateLabel.textColor = fg;
+    _stateLabel.backgroundColor = bg;
+}
+
+#pragma mark NSWindowDelegate
+
+- (void)windowDidBecomeKey:(NSNotification *)notification {
+    [_appDelegate promoteToSource:self];
+}
+
+- (void)windowWillClose:(NSNotification *)notification {
+    [_appDelegate listerClosing:self];
+}
+
 - (void)tableDoubleClick:(id)sender {
     NSInteger row = _tableView.clickedRow;
     if (row < 0) return;
@@ -365,7 +441,16 @@
     _listerControllers = [NSMutableArray array];
 
     [self createMainMenu];
-    [self newListerWindow:NSHomeDirectory()];
+
+    /* Default: open first Lister centered, sized so a Split Display produces
+     * two comfortably-usable halves above autolayout minimum. */
+    NSRect screen = [[NSScreen mainScreen] visibleFrame];
+    CGFloat w = MIN(1400, screen.size.width - 100);
+    CGFloat h = MIN(800,  screen.size.height - 100);
+    NSRect frame = NSMakeRect(screen.origin.x + (screen.size.width  - w) / 2,
+                              screen.origin.y + (screen.size.height - h) / 2,
+                              w, h);
+    [self newListerWindow:NSHomeDirectory() frame:frame];
 }
 
 - (void)applicationWillTerminate:(NSNotification *)notification {
@@ -392,6 +477,10 @@
     NSMenuItem *fileItem = [[NSMenuItem alloc] init];
     NSMenu *fileMenu = [[NSMenu alloc] initWithTitle:@"File"];
     [fileMenu addItemWithTitle:@"New Lister" action:@selector(newListerAction:) keyEquivalent:@"n"];
+    NSMenuItem *splitItem = [fileMenu addItemWithTitle:@"Split Display"
+                                                action:@selector(splitDisplayAction:)
+                                         keyEquivalent:@"N"];
+    splitItem.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
     [fileMenu addItemWithTitle:@"Close" action:@selector(performClose:) keyEquivalent:@"w"];
     fileItem.submenu = fileMenu;
     [mainMenu addItem:fileItem];
@@ -407,13 +496,94 @@
 }
 
 - (void)newListerAction:(id)sender {
-    [self newListerWindow:NSHomeDirectory()];
+    NSRect frame = NSMakeRect(100 + _listerControllers.count * 20,
+                              400 - _listerControllers.count * 20,
+                              700, 500);
+    [self newListerWindow:NSHomeDirectory() frame:frame];
 }
 
-- (void)newListerWindow:(NSString *)path {
-    ListerWindowController *ctrl = [[ListerWindowController alloc] initWithPath:path];
+/* Split Display — original DOpus: halves the current lister's space,
+ * opens a second lister tiled alongside. Horizontal split if wider than tall.
+ * Both windows share an edge exactly — no overlap, no gap. */
+- (void)splitDisplayAction:(id)sender {
+    ListerWindowController *current = (ListerWindowController *)
+        [NSApp keyWindow].windowController;
+    if (![current isKindOfClass:[ListerWindowController class]]) {
+        current = _activeSource ?: _listerControllers.lastObject;
+    }
+    if (!current) {
+        [self newListerAction:sender];
+        return;
+    }
+
+    NSRect frame = current.window.frame;
+    NSRect leftOrTop, rightOrBottom;
+    if (frame.size.width >= frame.size.height) {
+        /* Horizontal split: round to whole pixels so edges meet exactly */
+        CGFloat half = floor(frame.size.width / 2.0);
+        leftOrTop     = NSMakeRect(frame.origin.x,        frame.origin.y, half,                     frame.size.height);
+        rightOrBottom = NSMakeRect(frame.origin.x + half, frame.origin.y, frame.size.width - half,  frame.size.height);
+    } else {
+        /* Vertical split */
+        CGFloat half = floor(frame.size.height / 2.0);
+        leftOrTop     = NSMakeRect(frame.origin.x, frame.origin.y + (frame.size.height - half), frame.size.width, half);
+        rightOrBottom = NSMakeRect(frame.origin.x, frame.origin.y,                              frame.size.width, frame.size.height - half);
+    }
+
+    [current.window setFrame:leftOrTop display:YES animate:NO];
+
+    ListerWindowController *new = [self newListerWindow:current.currentPath frame:rightOrBottom];
+    /* initWithContentRect: treats frame as content rect — set the full frame after creation
+     * so both windows use identical frame semantics and meet exactly. */
+    [new.window setFrame:rightOrBottom display:YES animate:NO];
+}
+
+- (ListerWindowController *)newListerWindow:(NSString *)path frame:(NSRect)frame {
+    ListerWindowController *ctrl = [[ListerWindowController alloc] initWithPath:path
+                                                                          frame:frame
+                                                                    appDelegate:self];
     [_listerControllers addObject:ctrl];
     [ctrl showWindow:self];
+    /* Match original DOpus: new Listers are created with LISTERF_MAKE_SOURCE —
+     * promote unconditionally rather than relying on window key-focus notifications. */
+    [self promoteToSource:ctrl];
+    return ctrl;
+}
+
+/* Promote a Lister to SOURCE. Previous source becomes DEST (unless already a dest
+ * elsewhere). Globally at most one SOURCE and one DEST. Mirrors lister_check_source()
+ * + lister_check_dest() in original lister_activate.c. */
+- (void)promoteToSource:(ListerWindowController *)newSource {
+    if (!newSource || newSource.state == ListerStateSource) return;
+
+    ListerWindowController *prevSource = _activeSource;
+    ListerWindowController *prevDest = _activeDest;
+
+    /* Case: new source was the dest — its slot becomes free */
+    if (prevDest == newSource) {
+        _activeDest = nil;
+        prevDest = nil;
+    }
+
+    /* Promote */
+    [newSource setState:ListerStateSource];
+    _activeSource = newSource;
+
+    /* Old source → becomes new DEST (unless we already have a different dest) */
+    if (prevSource && prevSource != newSource) {
+        if (!prevDest) {
+            [prevSource setState:ListerStateDest];
+            _activeDest = prevSource;
+        } else {
+            [prevSource setState:ListerStateOff];
+        }
+    }
+}
+
+- (void)listerClosing:(ListerWindowController *)ctrl {
+    if (_activeSource == ctrl) _activeSource = nil;
+    if (_activeDest == ctrl) _activeDest = nil;
+    [_listerControllers removeObject:ctrl];
 }
 
 @end
