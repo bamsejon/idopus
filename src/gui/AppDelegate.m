@@ -1572,6 +1572,19 @@ typedef NS_ENUM(NSInteger, ListerState) {
     bmItem.submenu = bmMenu;
     [mainMenu addItem:bmItem];
 
+    /* Window menu — AppKit auto-populates Minimize, Zoom, Bring All to Front,
+     * Show Next/Previous Tab (⌃Tab / ⌃⇧Tab), Move Tab to New Window, etc.
+     * once we register the menu via setWindowsMenu:. */
+    NSMenuItem *windowItem = [[NSMenuItem alloc] init];
+    NSMenu *windowMenu = [[NSMenu alloc] initWithTitle:@"Window"];
+    [windowMenu addItemWithTitle:@"Minimize" action:@selector(performMiniaturize:) keyEquivalent:@"m"];
+    [windowMenu addItemWithTitle:@"Zoom" action:@selector(performZoom:) keyEquivalent:@""];
+    [windowMenu addItem:[NSMenuItem separatorItem]];
+    [windowMenu addItemWithTitle:@"Bring All to Front" action:@selector(arrangeInFront:) keyEquivalent:@""];
+    windowItem.submenu = windowMenu;
+    [mainMenu addItem:windowItem];
+    [NSApp setWindowsMenu:windowMenu];
+
     /* View menu */
     NSMenuItem *viewItem = [[NSMenuItem alloc] init];
     NSMenu *viewMenu = [[NSMenu alloc] initWithTitle:@"View"];
