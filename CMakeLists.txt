@@ -24,10 +24,19 @@ add_library(pal STATIC
 )
 target_link_libraries(pal PRIVATE pthread)
 
-# --- PAL test program ---
+# --- Core library ---
+add_library(core STATIC
+    src/core/dir_entry.c
+    src/core/dir_buffer.c
+)
+target_link_libraries(core PRIVATE pal)
+
+# --- Test programs ---
 add_executable(pal_test tests/pal_test.c)
 target_link_libraries(pal_test PRIVATE pal)
 
-# Future: core library, GUI app
-# add_library(core STATIC src/core/...)
+add_executable(core_test tests/core_test.c)
+target_link_libraries(core_test PRIVATE core pal)
+
+# Future: GUI app
 # add_executable(idopus src/gui/...)

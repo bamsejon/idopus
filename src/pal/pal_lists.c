@@ -78,6 +78,15 @@ void pal_list_remove(pal_node_t *node)
     node->prev = NULL;
 }
 
+void pal_list_remove_from(pal_list_t *list, pal_node_t *node)
+{
+    if (list->head == node)
+        list->head = node->next;
+    if (list->tail == node)
+        list->tail = node->prev;
+    pal_list_remove(node);
+}
+
 pal_node_t *pal_list_rem_head(pal_list_t *list)
 {
     pal_node_t *node = list->head;

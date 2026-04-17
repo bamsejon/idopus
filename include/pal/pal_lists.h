@@ -44,7 +44,8 @@ int  pal_list_count(const pal_list_t *list);
 void        pal_list_add_head(pal_list_t *list, pal_node_t *node);
 void        pal_list_add_tail(pal_list_t *list, pal_node_t *node);
 void        pal_list_insert(pal_list_t *list, pal_node_t *node, pal_node_t *after);
-void        pal_list_remove(pal_node_t *node);
+void        pal_list_remove(pal_node_t *node);  /* only safe if not head/tail */
+void        pal_list_remove_from(pal_list_t *list, pal_node_t *node); /* safe always */
 pal_node_t *pal_list_rem_head(pal_list_t *list);
 pal_node_t *pal_list_rem_tail(pal_list_t *list);
 
