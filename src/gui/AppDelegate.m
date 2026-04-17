@@ -614,9 +614,12 @@ typedef NS_ENUM(NSInteger, ListerState) {
         NSButton *b = [NSButton buttonWithTitle:buttons[i].title
                                          target:_appDelegate
                                          action:buttons[i].action];
-        b.bezelStyle = NSBezelStyleRounded;
-        b.controlSize = NSControlSizeSmall;
+        /* ShadowlessSquare + low vertical hugging lets buttons stretch to
+         * fill the panel height — needed so the bank spans full Lister height. */
+        b.bezelStyle = NSBezelStyleShadowlessSquare;
         b.font = [NSFont systemFontOfSize:11];
+        [b setContentHuggingPriority:NSLayoutPriorityDefaultLow
+                      forOrientation:NSLayoutConstraintOrientationVertical];
         b.translatesAutoresizingMaskIntoConstraints = NO;
         [column addArrangedSubview:b];
         [b.leadingAnchor constraintEqualToAnchor:column.leadingAnchor].active = YES;
@@ -636,18 +639,18 @@ typedef NS_ENUM(NSInteger, ListerState) {
 + (CGFloat)desiredWidth { return 108; }
 
 - (void)positionBetweenLeftFrame:(NSRect)leftFrame rightFrame:(NSRect)rightFrame {
-    /* Place the panel centered vertically in the gap between the two Listers.
-     * Horizontal position = gap between listers. Height uses the panel's
-     * natural intrinsic size (buttons at default height). */
+    /* Span the full Lister height — the panel fills the vertical gap exactly. */
     CGFloat x = NSMaxX(leftFrame);
-    CGFloat gapW = rightFrame.origin.x - x;
-    CGFloat listersCenterY = leftFrame.origin.y + leftFrame.size.height / 2;
+    CGFloat w = rightFrame.origin.x - x;
+    CGFloat h = leftFrame.size.height;
 
-    NSRect cur = self.window.frame;
-    NSRect frame = NSMakeRect(x + (gapW - cur.size.width) / 2,
-                              listersCenterY - cur.size.height / 2,
-                              cur.size.width,
-                              cur.size.height);
+    /* Clear any min/max constraints that would clamp setFrame */
+    self.window.contentMinSize = NSMakeSize(50, 100);
+    self.window.contentMaxSize = NSMakeSize(10000, 10000);
+    self.window.minSize = NSMakeSize(50, 100);
+    self.window.maxSize = NSMakeSize(10000, 10000);
+
+    NSRect frame = NSMakeRect(x, leftFrame.origin.y, w, h);
     [self.window setFrame:frame display:YES animate:NO];
 }
 
