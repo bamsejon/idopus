@@ -4,8 +4,13 @@
 #
 # Output: dist/iDOpus-<version>.dmg
 #
-# Requires: cmake, Xcode command line tools, hdiutil (built-in).
-# No code signing — users need to right-click Open on first launch.
+# Requires: cmake, Xcode command line tools, hdiutil, codesign (built-in).
+# Uses ad-hoc code signing (no Apple Developer ID required). Ad-hoc signing
+# still gives macOS a stable code identity, so TCC grants (Documents,
+# Downloads, etc.) are more likely to persist across rebuilds.
+#
+# Users still need to right-click → Open on first launch because the
+# signature isn't Apple-notarized.
 
 set -euo pipefail
 
@@ -36,6 +41,14 @@ echo "=== Running tests ==="
 "$BUILD_DIR/pal_test" >/dev/null
 "$BUILD_DIR/core_test" >/dev/null
 echo "  tests OK"
+
+echo "=== Code-signing (ad-hoc) ==="
+codesign --force --deep --sign - \
+    --options runtime \
+    --identifier "se.bamsejon.idopus" \
+    "$APP_PATH" >/dev/null
+codesign --verify --deep --strict "$APP_PATH"
+echo "  signed"
 
 echo "=== Creating $DMG_NAME ==="
 STAGE="$BUILD_DIR/dmg-stage"
