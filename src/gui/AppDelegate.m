@@ -3180,43 +3180,143 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
                               title:(NSString *)initialTitle
                             command:(NSString *)initialCommand
                           isDefault:(BOOL)initialDefault {
-    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 460, 132)];
+    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 460, 156)];
 
     NSTextField *extLbl = [NSTextField labelWithString:@"Extension:"];
-    extLbl.frame = NSMakeRect(0, 104, 90, 20);
-    NSTextField *extField = [[NSTextField alloc] initWithFrame:NSMakeRect(94, 100, 120, 24)];
+    extLbl.frame = NSMakeRect(0, 128, 90, 20);
+    NSTextField *extField = [[NSTextField alloc] initWithFrame:NSMakeRect(94, 124, 120, 24)];
     extField.placeholderString = @"txt (no dot)";
     extField.stringValue = initialExt ?: @"";
 
     NSTextField *titleLbl = [NSTextField labelWithString:@"Title:"];
-    titleLbl.frame = NSMakeRect(0, 72, 90, 20);
-    NSTextField *titleField = [[NSTextField alloc] initWithFrame:NSMakeRect(94, 68, 342, 24)];
+    titleLbl.frame = NSMakeRect(0, 96, 90, 20);
+    NSTextField *titleField = [[NSTextField alloc] initWithFrame:NSMakeRect(94, 92, 310, 24)];
     titleField.stringValue = initialTitle ?: @"";
 
+    /* Help button (ⓘ) — opens examples sheet */
+    NSButton *helpBtn = [NSButton buttonWithTitle:@""
+                                           target:self
+                                           action:@selector(showFileTypeHelp:)];
+    helpBtn.bezelStyle = NSBezelStyleHelpButton;
+    helpBtn.frame = NSMakeRect(412, 92, 24, 24);
+    helpBtn.toolTip = @"How file type actions work";
+
     NSTextField *cmdLbl = [NSTextField labelWithString:@"Command:"];
-    cmdLbl.frame = NSMakeRect(0, 40, 90, 20);
-    NSTextField *cmdField = [[NSTextField alloc] initWithFrame:NSMakeRect(94, 36, 342, 24)];
+    cmdLbl.frame = NSMakeRect(0, 64, 90, 20);
+    NSTextField *cmdField = [[NSTextField alloc] initWithFrame:NSMakeRect(94, 60, 240, 24)];
     cmdField.placeholderString = @"open -a TextEdit {FILE}";
     cmdField.stringValue = initialCommand ?: @"";
+    cmdField.identifier = @"fileTypeCmdField";  /* so the app-picker can find it */
+
+    NSButton *pickBtn = [NSButton buttonWithTitle:@"Choose App…"
+                                           target:self
+                                           action:@selector(pickAppForFileTypeAction:)];
+    pickBtn.frame = NSMakeRect(338, 60, 98, 24);
+    pickBtn.bezelStyle = NSBezelStyleRounded;
+
+    NSTextField *hint = [NSTextField wrappingLabelWithString:
+        @"{FILE}=clicked path, {FILES}=selection, {PATH}=directory. Or click “Choose App…”."];
+    hint.font = [NSFont systemFontOfSize:10];
+    hint.textColor = [NSColor secondaryLabelColor];
+    hint.frame = NSMakeRect(94, 28, 342, 28);
 
     NSButton *defBox = [NSButton checkboxWithTitle:@"Default action (runs on double-click)"
                                             target:nil action:nil];
-    defBox.frame = NSMakeRect(94, 6, 342, 20);
+    defBox.frame = NSMakeRect(94, 4, 342, 20);
     defBox.state = initialDefault ? NSControlStateValueOn : NSControlStateValueOff;
 
-    for (NSView *v in @[extLbl, extField, titleLbl, titleField, cmdLbl, cmdField, defBox])
+    for (NSView *v in @[extLbl, extField, titleLbl, titleField, helpBtn,
+                        cmdLbl, cmdField, pickBtn, hint, defBox])
         [acc addSubview:v];
 
     if (outView) *outView = acc;
     return @{ @"ext": extField, @"title": titleField, @"cmd": cmdField, @"default": defBox };
 }
 
+- (NSString *)fileTypeHelpText {
+    return
+        @"How file type actions work\n"
+        @"\n"
+        @"Each action runs as a shell command via /bin/sh -c with the\n"
+        @"active Lister's directory as cwd.\n"
+        @"\n"
+        @"Placeholders\n"
+        @"   {FILE}   the single path you double-clicked or right-clicked\n"
+        @"   {FILES}  space-separated, quoted paths of the current selection\n"
+        @"   {PATH}   the Lister's current directory\n"
+        @"\n"
+        @"To open a Mac app, prefer macOS's own /usr/bin/open:\n"
+        @"   open -a \"Visual Studio Code\" {FILE}\n"
+        @"   open -a Preview {FILES}\n"
+        @"   open -a VLC {FILES}\n"
+        @"\n"
+        @"CLI tools need to be in PATH or referenced by full path:\n"
+        @"   /usr/bin/ditto -x -k {FILE} ~/Desktop\n"
+        @"   /opt/homebrew/bin/ffmpeg -i {FILE} out.mp4\n"
+        @"\n"
+        @"If \"Default action\" is checked, this runs on double-click of\n"
+        @"any file with matching extension. Otherwise the action is only\n"
+        @"available in the right-click → Actions submenu.";
+}
+
+- (void)showFileTypeHelp:(id)sender {
+    NSAlert *a = [[NSAlert alloc] init];
+    a.messageText = @"File Type Action — How it works";
+    a.informativeText = [self fileTypeHelpText];
+    [a addButtonWithTitle:@"OK"];
+    [a runModal];
+}
+
+/* "Choose App…" — pick any .app bundle from /Applications (or anywhere) and
+ * auto-fill the command field with   open -a "AppName" {FILE} */
+- (void)pickAppForFileTypeAction:(NSButton *)sender {
+    NSOpenPanel *panel = [NSOpenPanel openPanel];
+    panel.directoryURL = [NSURL fileURLWithPath:@"/Applications"];
+    panel.allowedContentTypes = @[];   /* any file; filter manually */
+    panel.canChooseFiles = YES;
+    panel.canChooseDirectories = NO;
+    panel.treatsFilePackagesAsDirectories = NO;
+    panel.allowsMultipleSelection = NO;
+    panel.message = @"Choose an application";
+    if ([panel runModal] != NSModalResponseOK || !panel.URL) return;
+    if (![panel.URL.pathExtension.lowercaseString isEqualToString:@"app"]) {
+        [self showAlert:@"Choose App" info:@"Please pick a .app bundle." style:NSAlertStyleInformational];
+        return;
+    }
+
+    NSString *appName = [panel.URL.lastPathComponent stringByDeletingPathExtension];
+    NSString *cmd = [NSString stringWithFormat:@"open -a \"%@\" {FILE}", appName];
+
+    /* Walk up from the button to find the accessory view, then the cmd field by id. */
+    NSView *acc = sender.superview;
+    for (NSView *sub in acc.subviews) {
+        if ([sub isKindOfClass:[NSTextField class]] &&
+            [sub.identifier isEqualToString:@"fileTypeCmdField"]) {
+            ((NSTextField *)sub).stringValue = cmd;
+            break;
+        }
+    }
+}
+
 - (void)addFileTypeActionAction:(id)sender {
+    /* Pre-fill extension from the active Lister's selection if a single file
+     * is selected — convenient for the typical "I just saw a file, add an
+     * action for its type" flow. */
+    NSString *prefilledExt = nil;
+    ListerWindowController *src = [self sourceOrOperating];
+    NSArray<NSString *> *selNames = [src selectedNames];
+    if (selNames.count == 1) {
+        NSString *ext = selNames.firstObject.pathExtension.lowercaseString;
+        if (ext.length) prefilledExt = ext;
+    }
+
     NSAlert *alert = [[NSAlert alloc] init];
     alert.messageText = @"Add File Type Action";
-    alert.informativeText = @"Placeholders: {FILE} / {FILES} / {PATH}. Click ⓘ for examples.";
+    alert.informativeText = prefilledExt
+        ? [NSString stringWithFormat:@"Placeholders: {FILE} / {FILES} / {PATH}. Extension pre-filled from your selection (.%@). Click ⓘ for examples.", prefilledExt]
+        : @"Placeholders: {FILE} / {FILES} / {PATH}. Click ⓘ for examples.";
     NSView *acc = nil;
-    NSDictionary *fields = [self buildFileTypeForm:&acc extension:nil title:nil command:nil isDefault:NO];
+    NSDictionary *fields = [self buildFileTypeForm:&acc extension:prefilledExt title:nil command:nil isDefault:NO];
     alert.accessoryView = acc;
     [alert addButtonWithTitle:@"Add"];
     [alert addButtonWithTitle:@"Cancel"];
