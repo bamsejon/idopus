@@ -1622,7 +1622,37 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
 }
 
 - (void)reloadBuffer {
+    /* Skip reload while the user is inline-renaming — the active field
+     * editor would be destroyed when the table reloads its cells. The
+     * rename commit (or cancel) triggers its own refresh afterwards. */
+    NSResponder *fr = self.window.firstResponder;
+    if ([fr isKindOfClass:[NSTextView class]]) {
+        NSTextView *tv = (NSTextView *)fr;
+        if ([tv isDescendantOf:_tableView]) return;
+    }
+
+    /* Preserve selection across reload. Without this, FSEvents firing for
+     * unrelated changes (.DS_Store, Spotlight touches, etc.) would wipe the
+     * user's marked items in the middle of an interaction. */
+    NSArray<NSString *> *selectedNames = [self selectedNames];
+
     [_dataSource loadPath:_currentPath];
+
+    if (selectedNames.count > 0 && _dataSource.buffer) {
+        NSMutableIndexSet *restored = [NSMutableIndexSet indexSet];
+        NSSet<NSString *> *lookup = [NSSet setWithArray:selectedNames];
+        int total = _dataSource.buffer->stats.total_entries;
+        for (int i = 0; i < total; i++) {
+            dir_entry_t *e = dir_buffer_get_entry(_dataSource.buffer, i);
+            if (e && e->name && [lookup containsObject:[NSString stringWithUTF8String:e->name]]) {
+                [restored addIndex:(NSUInteger)i];
+            }
+        }
+        if (restored.count > 0) {
+            [_tableView selectRowIndexes:restored byExtendingSelection:NO];
+        }
+    }
+
     [self updateStatusBar];
 }
 
@@ -1634,26 +1664,43 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     NSInteger row = _tableView.selectedRow;
     if (row < 0) return NO;
 
+    [_tableView scrollRowToVisible:row];
     NSTableCellView *cell = [_tableView viewAtColumn:0 row:row makeIfNecessary:YES];
-    if (!cell.textField) return NO;
-    cell.textField.editable = YES;
-    cell.textField.selectable = YES;
-    cell.textField.drawsBackground = YES;
-    cell.textField.backgroundColor = [NSColor textBackgroundColor];
-    cell.textField.delegate = _dataSource;
+    NSTextField *tf = cell.textField;
+    if (!tf) return NO;
 
-    /* Stash old name + path on the text field so the delegate can commit */
-    objc_setAssociatedObject(cell.textField, "oldName", cell.textField.stringValue, OBJC_ASSOCIATION_COPY);
+    /* Configure the text field for editing. Stash the old name + flag it as
+     * being-renamed so controlTextDidEndEditing: knows to commit. */
+    tf.editable = YES;
+    tf.selectable = YES;
+    tf.bezeled = YES;
+    tf.drawsBackground = YES;
+    tf.backgroundColor = [NSColor textBackgroundColor];
+    tf.delegate = _dataSource;
+    objc_setAssociatedObject(tf, "oldName", tf.stringValue, OBJC_ASSOCIATION_COPY);
 
-    [self.window makeFirstResponder:cell.textField];
-    [cell.textField selectText:nil];
+    /* Make the window key if it isn't already, then focus the field and use
+     * its field editor to pre-select the stem (everything before the last
+     * dot). */
+    [self.window makeKeyAndOrderFront:nil];
+    if (![self.window makeFirstResponder:tf]) {
+        /* Fallback — couldn't become first responder; let caller use the dialog */
+        tf.editable = NO;
+        tf.bezeled = NO;
+        tf.drawsBackground = NO;
+        tf.delegate = nil;
+        objc_setAssociatedObject(tf, "oldName", nil, OBJC_ASSOCIATION_COPY);
+        return NO;
+    }
 
-    /* Select only the name stem (not the extension), Finder-style */
-    NSText *editor = [self.window fieldEditor:YES forObject:cell.textField];
-    NSString *name = cell.textField.stringValue;
+    NSText *editor = [self.window fieldEditor:YES forObject:tf];
+    [editor setString:tf.stringValue];
+    NSString *name = tf.stringValue;
     NSRange dot = [name rangeOfString:@"." options:NSBackwardsSearch];
     if (dot.location != NSNotFound && dot.location > 0) {
         editor.selectedRange = NSMakeRange(0, dot.location);
+    } else {
+        editor.selectedRange = NSMakeRange(0, name.length);
     }
     return YES;
 }
