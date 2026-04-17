@@ -1658,8 +1658,16 @@ typedef NS_ENUM(NSInteger, ListerState) {
     NSRect bankFrame  = NSMakeRect(x + listerW,             y, bankW,   h);
     NSRect rightFrame = NSMakeRect(x + listerW + bankW,     y, listerW, h);
 
-    ListerWindowController *left  = [self newListerWindow:NSHomeDirectory() frame:leftFrame];
-    ListerWindowController *right = [self newListerWindow:NSHomeDirectory() frame:rightFrame];
+    /* Restore last-open paths if saved, otherwise two Home panels. */
+    NSFileManager *fileMgr = [NSFileManager defaultManager];
+    NSArray<NSString *> *lastPaths = [[NSUserDefaults standardUserDefaults] arrayForKey:@"lastPaths"];
+    NSString *leftPath  = (lastPaths.count >= 1 && [fileMgr fileExistsAtPath:lastPaths[0]])
+                          ? lastPaths[0] : NSHomeDirectory();
+    NSString *rightPath = (lastPaths.count >= 2 && [fileMgr fileExistsAtPath:lastPaths[1]])
+                          ? lastPaths[1] : NSHomeDirectory();
+
+    ListerWindowController *left  = [self newListerWindow:leftPath  frame:leftFrame];
+    ListerWindowController *right = [self newListerWindow:rightPath frame:rightFrame];
     [left.window setFrame:leftFrame display:YES animate:NO];
     [right.window setFrame:rightFrame display:YES animate:NO];
 
@@ -1674,6 +1682,15 @@ typedef NS_ENUM(NSInteger, ListerState) {
 }
 
 - (void)applicationWillTerminate:(NSNotification *)notification {
+    /* Save the currentPath of each live Lister so next launch can restore */
+    NSMutableArray<NSString *> *paths = [NSMutableArray array];
+    for (ListerWindowController *lw in _listerControllers) {
+        if (lw.currentPath) [paths addObject:lw.currentPath];
+    }
+    if (paths.count > 0) {
+        [[NSUserDefaults standardUserDefaults] setObject:paths forKey:@"lastPaths"];
+    }
+
     if (_bufferCache) buffer_cache_free(_bufferCache);
 }
 
