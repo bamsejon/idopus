@@ -373,6 +373,10 @@ typedef NS_ENUM(NSInteger, ListerState) {
     if (_onColumnClick) _onColumnClick(tableColumn.identifier);
 }
 
+- (void)tableViewSelectionDidChange:(NSNotification *)notification {
+    [_owner updateStatusBar];
+}
+
 #pragma mark Drag-and-drop
 
 /* Drag out: each row writes an NSURL for its file, so macOS and other apps
@@ -722,9 +726,24 @@ typedef NS_ENUM(NSInteger, ListerState) {
     pal_format_size(buf->stats.total_bytes, sizeStr, sizeof(sizeStr));
     char freeStr[32];
     pal_format_size(buf->disk_free, freeStr, sizeof(freeStr));
+
+    NSIndexSet *sel = _tableView.selectedRowIndexes;
+    NSString *prefix = @"";
+    if (sel.count > 0) {
+        uint64_t selBytes = 0;
+        NSUInteger idx = sel.firstIndex;
+        while (idx != NSNotFound) {
+            dir_entry_t *e = dir_buffer_get_entry(buf, (int)idx);
+            if (e && !dir_entry_is_dir(e)) selBytes += (uint64_t)e->size;
+            idx = [sel indexGreaterThanIndex:idx];
+        }
+        char selBuf[32]; pal_format_size(selBytes, selBuf, sizeof(selBuf));
+        prefix = [NSString stringWithFormat:@"%lu selected (%s) | ",
+                  (unsigned long)sel.count, selBuf];
+    }
     _statusBar.stringValue = [NSString stringWithFormat:
-        @"%d files, %d dirs (%s) — %s free",
-        buf->stats.total_files, buf->stats.total_dirs, sizeStr, freeStr];
+        @"%@%d files, %d dirs (%s) — %s free",
+        prefix, buf->stats.total_files, buf->stats.total_dirs, sizeStr, freeStr];
 }
 
 #pragma mark Actions
