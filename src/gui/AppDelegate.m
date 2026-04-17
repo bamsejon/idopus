@@ -233,12 +233,13 @@ typedef NS_ENUM(NSInteger, ListerState) {
 - (NSArray<NSString *> *)selectedNames;
 - (void)reloadBuffer;
 - (void)updateStatusBar;
+- (BOOL)startInlineRenameIfSingleSelection;
 @end
 
 #pragma mark - Lister Table Data
 
 /* Wraps a dir_buffer_t for NSTableView display */
-@interface ListerDataSource : NSObject <NSTableViewDataSource, NSTableViewDelegate>
+@interface ListerDataSource : NSObject <NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate>
 @property (nonatomic) dir_buffer_t *buffer;
 @property (nonatomic, assign) NSTableView *tableView;
 @property (nonatomic, copy) void (^onColumnClick)(NSString *identifier);
@@ -511,6 +512,40 @@ typedef NS_ENUM(NSInteger, ListerState) {
 
 - (void)tableViewSelectionDidChange:(NSNotification *)notification {
     [_owner updateStatusBar];
+}
+
+#pragma mark NSTextFieldDelegate (inline rename)
+
+- (void)controlTextDidEndEditing:(NSNotification *)notification {
+    NSTextField *tf = notification.object;
+    if (!tf || !_owner) return;
+
+    NSString *oldName = objc_getAssociatedObject(tf, "oldName");
+    NSString *newName = [tf.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+
+    /* Restore non-editable state either way so the next selection doesn't
+     * accidentally enter edit mode. */
+    tf.editable = NO;
+    tf.drawsBackground = NO;
+    tf.delegate = nil;
+    objc_setAssociatedObject(tf, "oldName", nil, OBJC_ASSOCIATION_COPY);
+
+    if (!oldName || [newName isEqualToString:oldName] || newName.length == 0) {
+        tf.stringValue = oldName ?: @"";
+        return;
+    }
+
+    NSString *fromPath = [_owner.currentPath stringByAppendingPathComponent:oldName];
+    NSString *toPath   = [_owner.currentPath stringByAppendingPathComponent:newName];
+    NSError *err = nil;
+    if (![[NSFileManager defaultManager] moveItemAtPath:fromPath toPath:toPath error:&err]) {
+        tf.stringValue = oldName;
+        [_owner.appDelegate showAlert:@"Rename failed"
+                                 info:err.localizedDescription
+                                style:NSAlertStyleWarning];
+        return;
+    }
+    [_owner.appDelegate refreshAllListersShowing:_owner.currentPath];
 }
 
 #pragma mark Drag-and-drop
@@ -1589,6 +1624,38 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
 - (void)reloadBuffer {
     [_dataSource loadPath:_currentPath];
     [self updateStatusBar];
+}
+
+/* Start inline rename on the single selected row's name cell. Returns YES
+ * if editing started, NO if multiple rows or nothing is selected (caller
+ * falls back to the dialog-based rename). */
+- (BOOL)startInlineRenameIfSingleSelection {
+    if (_tableView.selectedRowIndexes.count != 1) return NO;
+    NSInteger row = _tableView.selectedRow;
+    if (row < 0) return NO;
+
+    NSTableCellView *cell = [_tableView viewAtColumn:0 row:row makeIfNecessary:YES];
+    if (!cell.textField) return NO;
+    cell.textField.editable = YES;
+    cell.textField.selectable = YES;
+    cell.textField.drawsBackground = YES;
+    cell.textField.backgroundColor = [NSColor textBackgroundColor];
+    cell.textField.delegate = _dataSource;
+
+    /* Stash old name + path on the text field so the delegate can commit */
+    objc_setAssociatedObject(cell.textField, "oldName", cell.textField.stringValue, OBJC_ASSOCIATION_COPY);
+
+    [self.window makeFirstResponder:cell.textField];
+    [cell.textField selectText:nil];
+
+    /* Select only the name stem (not the extension), Finder-style */
+    NSText *editor = [self.window fieldEditor:YES forObject:cell.textField];
+    NSString *name = cell.textField.stringValue;
+    NSRange dot = [name rangeOfString:@"." options:NSBackwardsSearch];
+    if (dot.location != NSNotFound && dot.location > 0) {
+        editor.selectedRange = NSMakeRange(0, dot.location);
+    }
+    return YES;
 }
 
 @end
@@ -3103,6 +3170,9 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
         [self showAlert:@"Rename" info:@"Select exactly one item to rename." style:NSAlertStyleInformational];
         return;
     }
+    /* Try inline rename first — faster and more macOS-native. */
+    if ([src startInlineRenameIfSingleSelection]) return;
+
     NSString *oldName = names.firstObject;
 
     NSAlert *alert = [[NSAlert alloc] init];
