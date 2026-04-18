@@ -843,6 +843,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
     actions.tag = 2;  /* identify in menuNeedsUpdate */
     NSMenuItem *openWith = [menu addItemWithTitle:L(@"Open With") action:NULL keyEquivalent:@""];
     openWith.submenu = [[NSMenu alloc] initWithTitle:L(@"Open With")];
+    openWith.tag = 3;  /* identify in menuNeedsUpdate */
     [menu addItemWithTitle:L(@"Reveal in Finder") action:@selector(revealInFinderAction:) keyEquivalent:@""].target = self;
     [menu addItemWithTitle:L(@"Open in Terminal") action:@selector(openInTerminalAction:) keyEquivalent:@""].target = self;
     [menu addItemWithTitle:L(@"Copy Path")       action:@selector(copyPathAction:) keyEquivalent:@""].target = self;
@@ -1261,9 +1262,11 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     NSMenuItem *extractItem = nil;
     NSMenuItem *actionsItem = nil;
     for (NSMenuItem *it in menu.itemArray) {
-        if ([it.title isEqualToString:@"Open With"]) openWithItem = it;
-        if (it.tag == 1 && [it.title isEqualToString:@"Extract"]) extractItem = it;
-        if (it.tag == 2 && [it.title isEqualToString:@"Actions"]) actionsItem = it;
+        /* Match by tag — title is localized, so literal string comparison
+         * would miss in any non-English locale. */
+        if (it.tag == 1) extractItem = it;
+        if (it.tag == 2) actionsItem = it;
+        if (it.tag == 3) openWithItem = it;
     }
 
     NSString *path = [self pathForContextClick];
