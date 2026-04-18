@@ -6188,15 +6188,50 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
         }
     }
 
-    /* SSH-origin hosts: only surface as SFTP — user already proved they
-     * SSH'd to them, don't guess that they also speak SMB.
-     * /etc/hosts: we can't tell; surface as both. */
-    for (NSString *name in sshNames) [self _addKnownHost:name protocol:@"sftp"];
+    /* SSH-origin hosts surface as SFTP immediately (we know they speak SSH).
+     * /etc/hosts get the SFTP entry too — the SMB entry is added only if
+     * the host actually responds on 445 (see _probeKnownHostForSMB). This
+     * avoids polluting the list with github.com-as-SMB while still picking
+     * up genuine SMB servers that live outside the local /24. */
+    for (NSString *name in sshNames) {
+        [self _addKnownHost:name protocol:@"sftp"];
+        [self _probeKnownHostForSMB:name];
+    }
     for (NSString *name in ambiguousNames) {
         [self _addKnownHost:name protocol:@"sftp"];
-        [self _addKnownHost:name protocol:@"smb"];
+        [self _probeKnownHostForSMB:name];
     }
     [self rebuildSidebar];
+}
+
+/* For each named host, resolve to IP and probe port 445 — but only if the
+ * resolved IP is in RFC1918 private space. That skips github.com and the
+ * internet at large (we don't want to hammer random public IPs) while
+ * catching servers on any reachable private subnet. */
+- (void)_probeKnownHostForSMB:(NSString *)host {
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        struct addrinfo hints = {0}, *res = NULL;
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_STREAM;
+        if (getaddrinfo(host.UTF8String, NULL, &hints, &res) != 0 || !res) return;
+        struct in_addr a = ((struct sockaddr_in *)res->ai_addr)->sin_addr;
+        uint32_t ip = ntohl(a.s_addr);
+        freeaddrinfo(res);
+
+        BOOL privateIP =
+            (ip & 0xFF000000u) == 0x0A000000u ||   /* 10.0.0.0/8 */
+            (ip & 0xFFF00000u) == 0xAC100000u ||   /* 172.16.0.0/12 */
+            (ip & 0xFFFF0000u) == 0xC0A80000u;     /* 192.168.0.0/16 */
+        if (!privateIP) return;
+        if (![weakSelf _probeHost:ip port:445]) return;
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            typeof(self) s = weakSelf; if (!s) return;
+            [s _addKnownHost:host protocol:@"smb"];
+            [s rebuildSidebar];
+        });
+    });
 }
 
 - (BOOL)_isBareIP:(NSString *)s {
