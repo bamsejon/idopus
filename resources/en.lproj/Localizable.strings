@@ -220,3 +220,12 @@
 "Hide transfer details"   = "Hide transfer details";
 "(enter password)"        = "(enter password)";
 "(saved — leave blank to reuse)" = "(saved — leave blank to reuse)";
+"Server:"                 = "Server:";
+"From:"                   = "From:";
+"To:"                     = "To:";
+"Transferred:"            = "Transferred:";
+"Speed:"                  = "Speed:";
+"Remaining:"              = "Remaining:";
+"Elapsed:"                = "Elapsed:";
+"Status:"                 = "Status:";
+"Running"                 = "Running";

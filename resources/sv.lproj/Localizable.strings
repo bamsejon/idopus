@@ -218,3 +218,12 @@
 "Hide transfer details"   = "Dölj överföringsdetaljer";
 "(enter password)"        = "(ange lösenord)";
 "(saved — leave blank to reuse)" = "(sparat — lämna tomt för att återanvända)";
+"Server:"                 = "Server:";
+"From:"                   = "Från:";
+"To:"                     = "Till:";
+"Transferred:"            = "Överfört:";
+"Speed:"                  = "Hastighet:";
+"Remaining:"              = "Kvar:";
+"Elapsed:"                = "Förflutet:";
+"Status:"                 = "Status:";
+"Running"                 = "Kör";

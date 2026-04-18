@@ -323,16 +323,24 @@ typedef NS_ENUM(NSInteger, ListerState) {
 @property (nonatomic, strong) NSProgressIndicator *spinner;
 @property (nonatomic, strong) NSButton *cancelButton;
 @property (nonatomic, strong) NSButton *disclosureButton;
-@property (nonatomic, strong) NSTextView *logView;
-@property (nonatomic, strong) NSScrollView *logScroll;
-@property (nonatomic, strong) NSLayoutConstraint *logHeightConstraint;
+@property (nonatomic, strong) NSView *detailsView;
+@property (nonatomic, strong) NSLayoutConstraint *detailsHeightConstraint;
+/* Value fields inside the details panel — caller sets meta (server/from/to)
+ * once; progress-callback updates the dynamic ones. */
+@property (nonatomic, strong) NSTextField *detailServer;
+@property (nonatomic, strong) NSTextField *detailFrom;
+@property (nonatomic, strong) NSTextField *detailTo;
+@property (nonatomic, strong) NSTextField *detailTransferred;
+@property (nonatomic, strong) NSTextField *detailSpeed;
+@property (nonatomic, strong) NSTextField *detailRemaining;
+@property (nonatomic, strong) NSTextField *detailElapsed;
+@property (nonatomic, strong) NSTextField *detailError;
+@property (nonatomic, strong) NSDate *startTime;
 @property (atomic, assign) BOOL cancelled;
 @property (nonatomic, assign) BOOL detailsExpanded;
 /* Optional: handler invoked by cancel: so jobs that don't use runOperation:
  * (rclone-backed downloads, etc.) can terminate their own tasks. */
 @property (nonatomic, copy) void (^cancelHandler)(void);
-
-- (void)appendLogLine:(NSString *)line;
 - (void)runOperation:(BOOL)isMove
                paths:(NSArray<NSString *> *)paths
                names:(NSArray<NSString *> *)names
@@ -2339,27 +2347,19 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     _disclosureButton.translatesAutoresizingMaskIntoConstraints = NO;
     [_rowView addSubview:_disclosureButton];
 
-    /* Scrollable log view — starts collapsed (height 0) and expands to show
-     * the raw rclone/file-op output when the disclosure triangle is on. */
-    _logScroll = [[NSScrollView alloc] init];
-    _logScroll.borderType = NSBezelBorder;
-    _logScroll.hasVerticalScroller = YES;
-    _logScroll.autohidesScrollers = NO;
-    _logScroll.translatesAutoresizingMaskIntoConstraints = NO;
-    _logScroll.hidden = YES;
+    /* Structured detail panel — label:value rows, macOS-inspector style. */
+    _detailsView = [[NSView alloc] init];
+    _detailsView.translatesAutoresizingMaskIntoConstraints = NO;
+    _detailsView.hidden = YES;
+    _detailsView.wantsLayer = YES;
+    _detailsView.layer.backgroundColor = NSColor.controlBackgroundColor.CGColor;
+    _detailsView.layer.cornerRadius = 6;
+    [_rowView addSubview:_detailsView];
 
-    _logView = [[NSTextView alloc] init];
-    _logView.editable = NO;
-    _logView.richText = NO;
-    _logView.font = [NSFont monospacedSystemFontOfSize:10 weight:NSFontWeightRegular];
-    _logView.drawsBackground = YES;
-    _logView.backgroundColor = [NSColor textBackgroundColor];
-    _logView.textContainer.widthTracksTextView = YES;
-    _logView.autoresizingMask = NSViewWidthSizable;
-    _logScroll.documentView = _logView;
-    [_rowView addSubview:_logScroll];
+    _startTime = [NSDate date];
+    [self _buildDetailFields];
 
-    _logHeightConstraint = [_logScroll.heightAnchor constraintEqualToConstant:0];
+    _detailsHeightConstraint = [_detailsView.heightAnchor constraintEqualToConstant:0];
 
     [NSLayoutConstraint activateConstraints:@[
         [_disclosureButton.leadingAnchor  constraintEqualToAnchor:_rowView.leadingAnchor constant:8],
@@ -2384,42 +2384,88 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
         [_statsLabel.trailingAnchor    constraintEqualToAnchor:_rowView.trailingAnchor constant:-12],
         [_statsLabel.topAnchor         constraintEqualToAnchor:_spinner.bottomAnchor constant:4],
 
-        [_logScroll.leadingAnchor      constraintEqualToAnchor:_rowView.leadingAnchor constant:12],
-        [_logScroll.trailingAnchor     constraintEqualToAnchor:_rowView.trailingAnchor constant:-12],
-        [_logScroll.topAnchor          constraintEqualToAnchor:_statsLabel.bottomAnchor constant:6],
-        [_logScroll.bottomAnchor       constraintEqualToAnchor:_rowView.bottomAnchor constant:-6],
-        _logHeightConstraint,
+        [_detailsView.leadingAnchor    constraintEqualToAnchor:_rowView.leadingAnchor constant:12],
+        [_detailsView.trailingAnchor   constraintEqualToAnchor:_rowView.trailingAnchor constant:-12],
+        [_detailsView.topAnchor        constraintEqualToAnchor:_statsLabel.bottomAnchor constant:6],
+        [_detailsView.bottomAnchor     constraintEqualToAnchor:_rowView.bottomAnchor constant:-6],
+        _detailsHeightConstraint,
     ]];
 
     return self;
 }
 
+/* Lay out the rows inside _detailsView as label:value pairs. Right-aligned
+ * labels in the first column, values in the second — mirrors the macOS
+ * Get Info / System Settings inspector style. */
+- (void)_buildDetailFields {
+    NSArray<NSString *> *labels = @[
+        L(@"Server:"), L(@"From:"), L(@"To:"),
+        L(@"Transferred:"), L(@"Speed:"),
+        L(@"Remaining:"), L(@"Elapsed:"), L(@"Status:")
+    ];
+    NSMutableArray<NSTextField *> *values = [NSMutableArray array];
+    CGFloat labelCol = 104;        /* right-aligned label column width */
+    CGFloat rowH = 18;
+    CGFloat y = 8;
+    CGFloat totalH = 8 + labels.count * (rowH + 2) + 8;
+    for (NSInteger i = (NSInteger)labels.count - 1; i >= 0; i--) {
+        NSTextField *lbl = [NSTextField labelWithString:labels[i]];
+        lbl.alignment = NSTextAlignmentRight;
+        lbl.font = [NSFont systemFontOfSize:11];
+        lbl.textColor = [NSColor secondaryLabelColor];
+        lbl.frame = NSMakeRect(8, y, labelCol, rowH);
+        lbl.autoresizingMask = NSViewMaxXMargin;
+        [_detailsView addSubview:lbl];
+
+        NSTextField *val = [NSTextField labelWithString:@"—"];
+        val.font = [NSFont systemFontOfSize:11];
+        val.textColor = [NSColor labelColor];
+        val.lineBreakMode = NSLineBreakByTruncatingMiddle;
+        val.selectable = YES;
+        val.frame = NSMakeRect(labelCol + 16, y, 280, rowH);
+        val.autoresizingMask = NSViewWidthSizable;
+        [_detailsView addSubview:val];
+        [values insertObject:val atIndex:0];
+        y += rowH + 2;
+    }
+    _detailServer      = values[0];
+    _detailFrom        = values[1];
+    _detailTo          = values[2];
+    _detailTransferred = values[3];
+    _detailSpeed       = values[4];
+    _detailRemaining   = values[5];
+    _detailElapsed     = values[6];
+    _detailError       = values[7];
+    _detailError.stringValue = L(@"Running");
+    /* Remember the target height so toggleDetails: can use it. */
+    objc_setAssociatedObject(self, "detailsH", @(totalH), OBJC_ASSOCIATION_RETAIN);
+}
+
 - (void)toggleDetails:(id)sender {
     self.detailsExpanded = !self.detailsExpanded;
-    self.logScroll.hidden = !self.detailsExpanded;
-    self.logHeightConstraint.constant = self.detailsExpanded ? 160 : 0;
+    self.detailsView.hidden = !self.detailsExpanded;
+    CGFloat h = [objc_getAssociatedObject(self, "detailsH") doubleValue];
+    self.detailsHeightConstraint.constant = self.detailsExpanded ? h : 0;
     self.disclosureButton.toolTip = self.detailsExpanded
         ? L(@"Hide transfer details") : L(@"Show transfer details");
     [[JobsPanelController shared] relayoutForExpandedRow];
 }
 
-- (void)appendLogLine:(NSString *)line {
-    if (!line.length) return;
-    NSString *text = [line hasSuffix:@"\n"] ? line
-                                            : [line stringByAppendingString:@"\n"];
-    NSAttributedString *a = [[NSAttributedString alloc] initWithString:text
-        attributes:@{ NSFontAttributeName: self.logView.font,
-                      NSForegroundColorAttributeName: [NSColor labelColor] }];
-    [self.logView.textStorage appendAttributedString:a];
-    /* Trim if gigantic — keep the last 4k lines' worth roughly. */
-    if (self.logView.textStorage.length > 400000) {
-        [self.logView.textStorage deleteCharactersInRange:NSMakeRange(0, 200000)];
-    }
-    if (self.detailsExpanded) {
-        [self.logView scrollRangeToVisible:
-            NSMakeRange(self.logView.textStorage.length, 0)];
-    }
+/* Format elapsed seconds as "45 s", "2 min 15 s", "1 h 20 min". */
++ (NSString *)_formatDuration:(NSTimeInterval)sec {
+    long s = (long)sec;
+    if (s < 60) return [NSString stringWithFormat:@"%ld s", s];
+    if (s < 3600) return [NSString stringWithFormat:@"%ld min %ld s", s/60, s%60];
+    return [NSString stringWithFormat:@"%ld h %ld min", s/3600, (s%3600)/60];
 }
+
+- (void)updateElapsed {
+    NSTimeInterval dt = [[NSDate date] timeIntervalSinceDate:_startTime ?: [NSDate date]];
+    _detailElapsed.stringValue = [ProgressSheetController _formatDuration:dt];
+}
+
+/* No-op kept so existing callers that used the removed raw-log path compile. */
+- (void)appendLogLine:(NSString *)line { (void)line; }
 
 - (void)cancel:(id)sender {
     self.cancelled = YES;
@@ -5778,8 +5824,24 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
         : [NSString stringWithFormat:L(@"%lu items from %@"),
            (unsigned long)names.count, src.remoteLabel ?: @"remote"];
     job.statsLabel.stringValue = L(@"Preparing…");
+    job.startTime = [NSDate date];
+    /* Seed the detail panel with the static metadata. Dynamic values
+     * (Transferred / Speed / Remaining / Elapsed) are written from the
+     * progress callback and the elapsed-tick timer below. */
+    job.detailServer.stringValue = src.remoteLabel ?: @"—";
+    job.detailFrom.stringValue   = src.currentPath ?: @"—";
+    job.detailTo.stringValue     = destDir ?: @"—";
     [job.spinner startAnimation:nil];
     [[JobsPanelController shared] addJobRow:job.rowView];
+
+    /* 1 Hz tick to refresh the "Elapsed:" field. Invalidated on completion. */
+    __weak ProgressSheetController *weakJob = job;
+    __block NSTimer *elapsedTimer = [NSTimer scheduledTimerWithTimeInterval:1.0
+        repeats:YES block:^(NSTimer *t) {
+        ProgressSheetController *j = weakJob;
+        if (!j) { [t invalidate]; return; }
+        [j updateElapsed];
+    }];
 
     /* Regex cached once — matches rclone's `Transferred:` progress line, e.g.
      *   Transferred:       64 MiB / 128 MiB, 50%, 10.23 MiB/s, ETA 6s
@@ -5814,7 +5876,6 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
                           remotePath:remotePath
                              toLocal:destDir
                             progress:^(NSString *line) {
-            [job appendLogLine:line];
             NSTextCheckingResult *m = [rxProgress firstMatchInString:line
                 options:0 range:NSMakeRange(0, line.length)];
             if (!m) return;
@@ -5835,17 +5896,22 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
             }
             job.spinner.doubleValue = pctVal;
 
-            /* Format: "381 MB of 6.5 GB — 11.5 MB/s — 9 min remaining" —
-             * matches Finder/AirDrop phrasing. Em-dash separators. */
+            /* Top stats line (Finder/AirDrop phrasing). */
             NSMutableString *stats = [NSMutableString string];
             [stats appendFormat:L(@"%@ of %@"), done, tot];
             if (speed.length) [stats appendFormat:@" — %@", speed];
             if (eta.length)   [stats appendFormat:@" — %@ %@",
                                eta, L(@"remaining")];
             job.statsLabel.stringValue = stats;
+
+            /* Expanded details panel — split into its own labeled fields. */
+            job.detailTransferred.stringValue = [NSString stringWithFormat:L(@"%@ of %@"), done, tot];
+            job.detailSpeed.stringValue       = speed.length ? speed : @"—";
+            job.detailRemaining.stringValue   = eta.length ? eta : @"—";
         } completion:^(int status) {
             if (status != 0) anyFailed = YES;
             if (--remaining == 0) {
+                [elapsedTimer invalidate];
                 [job.spinner stopAnimation:nil];
                 [[JobsPanelController shared] removeJobRow:job.rowView];
                 [self refreshAllListersShowing:destDir];
