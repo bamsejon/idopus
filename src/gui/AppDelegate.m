@@ -9,6 +9,14 @@
 #import <QuickLookThumbnailing/QuickLookThumbnailing.h>
 #import <CoreServices/CoreServices.h>
 #import <objc/runtime.h>
+#include <sys/socket.h>
+#include <net/if.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <ifaddrs.h>
+#include <fcntl.h>
+#include <netdb.h>
+#include <errno.h>
 
 /* Shorthand for NSLocalizedString with nil comment. Keys are the English
  * source strings; translations live in resources/<lang>.lproj/Localizable.strings
@@ -5603,14 +5611,116 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     [_sideTable reloadData];
 }
 
-#pragma mark Bonjour discovery
+#pragma mark Bonjour + port-scan discovery
 
 - (void)startBonjour {
     _browser = [[NSNetServiceBrowser alloc] init];
     _browser.delegate = self;
     /* _ssh._tcp is the standard advertisement for SSH/SFTP. Catches macOS with
-     * Remote Login enabled + most Linux NAS boxes that register via Avahi. */
+     * Remote Login enabled + most Linux NAS boxes that register via Avahi.
+     * Linux machines that have sshd but *don't* advertise via Avahi won't
+     * show up here — the port scan below catches those. */
     [_browser searchForServicesOfType:@"_ssh._tcp." inDomain:@"local."];
+    [self startPortScan];
+}
+
+/* Parallel non-blocking connect() to port 22 across the local /24 subnet(s).
+ * Catches Linux boxes that run sshd without advertising via Avahi — most of
+ * them. Finishes in ~1 s for a typical home LAN. */
+- (void)startPortScan {
+    struct ifaddrs *ifa_head = NULL;
+    if (getifaddrs(&ifa_head) != 0) return;
+
+    NSMutableSet<NSNumber *> *seenNets = [NSMutableSet set];
+    NSMutableArray *targets = [NSMutableArray array];   /* array of @{net24, myHost} */
+    for (struct ifaddrs *ifa = ifa_head; ifa; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET) continue;
+        if ((ifa->ifa_flags & IFF_LOOPBACK) || !(ifa->ifa_flags & IFF_UP)) continue;
+        struct sockaddr_in *sa = (struct sockaddr_in *)ifa->ifa_addr;
+        uint32_t ip = ntohl(sa->sin_addr.s_addr);
+        /* Skip link-local 169.254/16 — no SSH there realistically. */
+        if ((ip & 0xFFFF0000) == 0xA9FE0000) continue;
+        uint32_t net24 = ip & 0xFFFFFF00;
+        if ([seenNets containsObject:@(net24)]) continue;
+        [seenNets addObject:@(net24)];
+        [targets addObject:@{@"net": @(net24), @"my": @(ip & 0xFF)}];
+    }
+    freeifaddrs(ifa_head);
+    if (targets.count == 0) return;
+
+    __weak typeof(self) weakSelf = self;
+    dispatch_queue_t q = dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
+
+    for (NSDictionary *t in targets) {
+        uint32_t net24 = ((NSNumber *)t[@"net"]).unsignedIntValue;
+        uint32_t myHost = ((NSNumber *)t[@"my"]).unsignedIntValue;
+        for (uint32_t h = 1; h <= 254; h++) {
+            if (h == myHost) continue;
+            uint32_t target = net24 | h;
+            dispatch_async(q, ^{
+                if ([weakSelf _probeHost:target port:22]) {
+                    struct in_addr a = { .s_addr = htonl(target) };
+                    char buf[INET_ADDRSTRLEN];
+                    inet_ntop(AF_INET, &a, buf, sizeof(buf));
+                    NSString *ipStr = [NSString stringWithUTF8String:buf];
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        [weakSelf _addScanHit:ipStr];
+                    });
+                }
+            });
+        }
+    }
+    /* Pure fire-and-forget: the dialog stays interactive while results trickle in. */
+}
+
+/* Single non-blocking connect attempt with a 300 ms total budget. Returns
+ * YES if the port is accepting connections. */
+- (BOOL)_probeHost:(uint32_t)hostOrder port:(uint16_t)port {
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) return NO;
+    int flags = fcntl(s, F_GETFL, 0);
+    fcntl(s, F_SETFL, flags | O_NONBLOCK);
+
+    struct sockaddr_in sa = {0};
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons(port);
+    sa.sin_addr.s_addr = htonl(hostOrder);
+
+    int r = connect(s, (struct sockaddr *)&sa, sizeof(sa));
+    BOOL ok = NO;
+    if (r == 0) {
+        ok = YES;
+    } else if (errno == EINPROGRESS) {
+        fd_set wfds; FD_ZERO(&wfds); FD_SET(s, &wfds);
+        struct timeval tv = { 0, 300 * 1000 };
+        if (select(s + 1, NULL, &wfds, NULL, &tv) > 0) {
+            int err = 0; socklen_t len = sizeof(err);
+            if (getsockopt(s, SOL_SOCKET, SO_ERROR, &err, &len) == 0 && err == 0) ok = YES;
+        }
+    }
+    close(s);
+    return ok;
+}
+
+/* Record a port-scan hit in the _discovered array. Dedupes against any
+ * Bonjour-resolved entry with the same host *or* raw IP. */
+- (void)_addScanHit:(NSString *)ip {
+    for (NSDictionary *e in _discovered) {
+        if ([e[@"host"] isEqualToString:ip]) return;
+    }
+    /* Attempt a quick reverse-DNS via NSHost (async internally, we just read
+     * what's already cached) so a hostname appears if one is known. */
+    NSString *display = ip;
+    NSHost *h = [NSHost hostWithAddress:ip];
+    if (h.name.length && ![h.name isEqualToString:ip]) display = h.name;
+    [_discovered addObject:@{
+        @"displayName": display,
+        @"host":        ip,
+        @"port":        @"22",
+        @"user":        @"",
+        @"source":      @"nearby",
+    }];
+    [self rebuildSidebar];
 }
 
 - (void)stopBonjour {
