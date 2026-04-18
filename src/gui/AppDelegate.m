@@ -6862,12 +6862,32 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     NSDictionary *d = item;
     if (d[@"placeholder"]) return;
     NSString *proto = d[@"protocol"] ?: @"sftp";
+    NSString *host  = d[@"host"] ?: @"";
+    NSString *user  = d[@"user"] ?: @"";
+    NSString *port  = d[@"port"] ?: @"";
+    NSString *path  = d[@"path"] ?: @"";
+
+    /* NEARBY and discovered rows don't carry credentials. Auto-fill from any
+     * matching SAVED entry so the user doesn't have to retype username (and
+     * path) on every reconnect to a server they've used before. */
+    if (!user.length || !path.length) {
+        for (NSDictionary *saved in [ConnectDialogController savedConnections]) {
+            NSString *sproto = saved[@"protocol"] ?: @"sftp";
+            if (![saved[@"host"] isEqualToString:host]) continue;
+            if (![sproto isEqualToString:proto]) continue;
+            if (!user.length && [saved[@"user"] length]) user = saved[@"user"];
+            if (!path.length && [saved[@"path"] length]) path = saved[@"path"];
+            if (!port.length && [saved[@"port"] length]) port = saved[@"port"];
+            break;
+        }
+    }
+
     [_protocolPopup selectItemWithTitle:[proto isEqualToString:@"smb"] ? @"SMB" : @"SFTP"];
     [self protocolChanged:nil];
-    _hostField.stringValue = d[@"host"] ?: @"";
-    _portField.stringValue = d[@"port"] ?: @"";
-    _userField.stringValue = d[@"user"] ?: @"";
-    if (d[@"path"]) _pathField.stringValue = d[@"path"];
+    _hostField.stringValue = host;
+    _portField.stringValue = port;
+    _userField.stringValue = user;
+    if (path.length) _pathField.stringValue = path;
     [self.window makeFirstResponder:_passField];
 }
 
