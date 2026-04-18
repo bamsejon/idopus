@@ -89,6 +89,9 @@ typedef NS_ENUM(NSInteger, ListerState) {
 @property (nonatomic, strong) ConnectDialogController *connectDialog;
 @property (nonatomic, strong) NSMutableDictionary<NSValue *, NSValue *> *lastListerFrames;
 @property (nonatomic, assign) BOOL suppressSnap;
+/* Snapshotted layout so the zoom button toggles: first click tiles full
+ * screen, second click restores these frames. Nil = currently untiled. */
+@property (nonatomic, strong) NSMutableDictionary<NSValue *, NSValue *> *preZoomFrames;
 
 - (void)refreshAllListersShowing:(NSString *)path;
 - (void)raiseAllListerWindowsExcept:(ListerWindowController *)primary;
@@ -783,6 +786,13 @@ typedef NS_ENUM(NSInteger, ListerState) {
                                                         defer:NO];
     window.title = @"iDOpus";
     window.minSize = NSMakeSize(400, 300);
+    /* Disable native macOS full-screen entirely. The green zoom button still
+     * works (intercepted in windowShouldZoom:) but long-pressing it or
+     * picking "Enter Full Screen" from the menu no longer lifts a single
+     * Lister into its own space — that shatters the tiled workspace and
+     * leaves the Button Bank in a broken state when coming back. Users who
+     * want "fill the screen" use the zoom button, which tiles all three. */
+    window.collectionBehavior |= NSWindowCollectionBehaviorFullScreenNone;
     /* Unique tabbingIdentifier so this Lister isn't auto-merged with sibling
      * Listers at startup (user may have "Prefer Tabs: Always" set). Explicit
      * New Tab still works via addTabbedWindow:. */
@@ -5562,9 +5572,8 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
 
 /* Tile the three workspace windows across the full usable screen: Listers
  * split the horizontal space evenly, bank keeps its current width, all three
- * share the screen's full height. Invoked when the user clicks any Lister's
- * green zoom button — the idea is "make the workspace fill the screen", not
- * "maximise this one window on top of the others". */
+ * share the screen's full height. Second click restores the pre-zoom layout
+ * so the green zoom button toggles like NSWindow's native zoom does. */
 - (void)zoomToTileWorkspace {
     if (!_buttonBankPanel) return;
     NSMutableArray<ListerWindowController *> *visible = [NSMutableArray array];
@@ -5576,9 +5585,34 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     if (left.window.frame.origin.x > right.window.frame.origin.x) {
         ListerWindowController *t = left; left = right; right = t;
     }
+
+    /* Toggle: if we have a stored pre-zoom snapshot, we're currently zoomed
+     * and should restore. Otherwise, snapshot-then-tile. */
+    if (_preZoomFrames.count > 0) {
+        _suppressSnap = YES;
+        NSValue *lv = _preZoomFrames[[NSValue valueWithNonretainedObject:left.window]];
+        NSValue *rv = _preZoomFrames[[NSValue valueWithNonretainedObject:right.window]];
+        NSValue *bv = _preZoomFrames[[NSValue valueWithNonretainedObject:_buttonBankPanel.window]];
+        if (lv) [left.window  setFrame:lv.rectValue display:YES animate:YES];
+        if (rv) [right.window setFrame:rv.rectValue display:YES animate:YES];
+        if (bv) [_buttonBankPanel.window setFrame:bv.rectValue display:YES animate:NO];
+        _suppressSnap = NO;
+        _preZoomFrames = nil;
+        [self snapshotListerFrames];
+        return;
+    }
+
+    _preZoomFrames = [NSMutableDictionary dictionary];
+    _preZoomFrames[[NSValue valueWithNonretainedObject:left.window]]
+        = [NSValue valueWithRect:left.window.frame];
+    _preZoomFrames[[NSValue valueWithNonretainedObject:right.window]]
+        = [NSValue valueWithRect:right.window.frame];
+    _preZoomFrames[[NSValue valueWithNonretainedObject:_buttonBankPanel.window]]
+        = [NSValue valueWithRect:_buttonBankPanel.window.frame];
+
     NSScreen *screen = left.window.screen ?: [NSScreen mainScreen];
     NSRect vis = screen.visibleFrame;
-    CGFloat bankW = MAX(80, _buttonBankPanel.window.frame.size.width);
+    CGFloat bankW = MAX(80, MIN(400, _buttonBankPanel.window.frame.size.width));
     CGFloat listerW = floor((vis.size.width - bankW) / 2);
 
     _suppressSnap = YES;
@@ -5643,9 +5677,11 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     _suppressSnap = NO;
 }
 
-/* Size the Button Bank to fit exactly in the gap between the two visible
- * Listers, matching their vertical extent. Called after Lister resize /
- * Lister close / Button Bank show. No-op for 1 or 3+ Listers. */
+/* Keep the Button Bank docked flush to the left Lister's right edge, at its
+ * *current* width (not stretched to fill the gap — that was the v1.6.6 bug
+ * that produced giant half-screen-wide banks). Height matches the left
+ * Lister. DEST is snapped to the bank's right edge via snapDestToBankRightEdge.
+ * No-op for 1 or 3+ Listers. */
 - (void)enforceBankBetweenListers {
     if (!_buttonBankPanel) return;
     NSMutableArray<ListerWindowController *> *visible = [NSMutableArray array];
@@ -5659,23 +5695,24 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
         ListerWindowController *t = left; left = right; right = t;
     }
     NSRect lf = left.window.frame;
-    NSRect rf = right.window.frame;
+    NSRect bankOld = _buttonBankPanel.window.frame;
 
-    CGFloat minBankW = 80;
-    CGFloat bankX = NSMaxX(lf);
-    CGFloat bankW = rf.origin.x - bankX;
+    /* Preserve the bank's existing width (clamp to [80, 400]) — it's what
+     * the user has configured by dragging the edge. */
+    CGFloat bankW = MAX(80, MIN(400, bankOld.size.width));
+    if (bankW < 80) bankW = [ButtonBankPanelController desiredWidth];
+    NSRect bank = NSMakeRect(NSMaxX(lf), lf.origin.y, bankW, lf.size.height);
+
     _suppressSnap = YES;
-    if (bankW < minBankW) {
-        /* No room — shove the right Lister to open up minBankW worth of gap. */
-        bankW = minBankW;
-        NSRect newR = rf;
-        newR.origin.x = bankX + bankW;
-        [right.window setFrame:newR display:YES animate:NO];
-        _lastListerFrames[[NSValue valueWithNonretainedObject:right.window]] =
-            [NSValue valueWithRect:newR];
-    }
-    NSRect bank = NSMakeRect(bankX, lf.origin.y, bankW, lf.size.height);
     [_buttonBankPanel.window setFrame:bank display:YES animate:NO];
+    /* Snap DEST flush against the bank's right edge, same vertical extent. */
+    NSRect newR = right.window.frame;
+    newR.origin.x = NSMaxX(bank);
+    newR.origin.y = lf.origin.y;
+    newR.size.height = lf.size.height;
+    [right.window setFrame:newR display:YES animate:NO];
+    _lastListerFrames[[NSValue valueWithNonretainedObject:right.window]] =
+        [NSValue valueWithRect:newR];
     _suppressSnap = NO;
     [self snapshotListerFrames];
 }
