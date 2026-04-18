@@ -5703,24 +5703,60 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
 }
 
 /* Record a port-scan hit in the _discovered array. Dedupes against any
- * Bonjour-resolved entry with the same host *or* raw IP. */
+ * Bonjour-resolved entry with the same host. Show the IP immediately, then
+ * upgrade the displayName once reverse-DNS returns — don't block the sidebar
+ * on DNS latency. */
 - (void)_addScanHit:(NSString *)ip {
     for (NSDictionary *e in _discovered) {
         if ([e[@"host"] isEqualToString:ip]) return;
     }
-    /* Attempt a quick reverse-DNS via NSHost (async internally, we just read
-     * what's already cached) so a hostname appears if one is known. */
-    NSString *display = ip;
-    NSHost *h = [NSHost hostWithAddress:ip];
-    if (h.name.length && ![h.name isEqualToString:ip]) display = h.name;
-    [_discovered addObject:@{
-        @"displayName": display,
+    NSMutableDictionary *entry = [@{
+        @"displayName": ip,
         @"host":        ip,
         @"port":        @"22",
         @"user":        @"",
         @"source":      @"nearby",
-    }];
+    } mutableCopy];
+    [_discovered addObject:entry];
     [self rebuildSidebar];
+
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        NSString *name = [weakSelf _reverseDNSForIPString:ip];
+        if (!name.length || [name isEqualToString:ip]) return;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            typeof(self) s = weakSelf; if (!s) return;
+            /* Locate the still-present entry by IP (it may have been displaced
+             * by a later Bonjour hit, which is fine — just skip). */
+            for (NSUInteger i = 0; i < s->_discovered.count; i++) {
+                NSMutableDictionary *d = [s->_discovered[i] mutableCopy];
+                if ([d[@"host"] isEqualToString:ip]) {
+                    d[@"displayName"] = name;
+                    d[@"host"] = name;   /* prefer name for rclone spec */
+                    s->_discovered[i] = d;
+                    [s rebuildSidebar];
+                    break;
+                }
+            }
+        });
+    });
+}
+
+/* Blocking reverse DNS via getnameinfo() with NI_NAMEREQD — returns nil when
+ * no PTR record exists. Called on a utility queue so it doesn't stall the
+ * scan or the main thread. */
+- (NSString *)_reverseDNSForIPString:(NSString *)ipStr {
+    struct sockaddr_in sa = {0};
+    sa.sin_family = AF_INET;
+    sa.sin_len = sizeof(sa);
+    if (inet_pton(AF_INET, ipStr.UTF8String, &sa.sin_addr) != 1) return nil;
+    char host[NI_MAXHOST];
+    int r = getnameinfo((struct sockaddr *)&sa, sizeof(sa),
+                        host, sizeof(host),
+                        NULL, 0,
+                        NI_NAMEREQD);
+    if (r != 0) return nil;
+    return [NSString stringWithUTF8String:host];
 }
 
 - (void)stopBonjour {
