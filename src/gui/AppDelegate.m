@@ -8,6 +8,7 @@
 #import <Quartz/Quartz.h>
 #import <QuickLookThumbnailing/QuickLookThumbnailing.h>
 #import <CoreServices/CoreServices.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <objc/runtime.h>
 #include <sys/socket.h>
 #include <net/if.h>
@@ -418,6 +419,43 @@ typedef NS_ENUM(NSInteger, ListerState) {
 
 - (NSImage *)iconForEntry:(dir_entry_t *)entry {
     if (!entry || !_owner) return nil;
+
+    /* Remote Listers: there's no local file to inspect for an icon, so use
+     * system-symbol folder for dirs and extension-derived icons for files.
+     * Thumbnail generation is skipped entirely (QL has no way to preview a
+     * remote file without downloading it first). */
+    if (_owner.isRemote) {
+        if (dir_entry_is_dir(entry)) {
+            NSImage *c = _iconCache[@"__remote_dir__"];
+            if (c) return c;
+            NSImage *img = [NSImage imageWithSystemSymbolName:@"folder.fill"
+                                        accessibilityDescription:nil];
+            if (img) {
+                img.size = NSMakeSize(16, 16);
+                _iconCache[@"__remote_dir__"] = img;
+            }
+            return img;
+        }
+        const char *ext = pal_path_extension(entry->name);
+        NSString *extKey = ext && *ext
+            ? [@"remote." stringByAppendingString:[NSString stringWithUTF8String:ext]].lowercaseString
+            : @"__remote_file__";
+        NSImage *cached = _iconCache[extKey];
+        if (cached) return cached;
+        NSImage *img = nil;
+        if (ext && *ext) {
+            img = [[NSWorkspace sharedWorkspace]
+                iconForContentType:[UTType typeWithFilenameExtension:
+                                    [NSString stringWithUTF8String:ext]]];
+        }
+        if (!img) img = [NSImage imageWithSystemSymbolName:@"doc"
+                                     accessibilityDescription:nil];
+        if (img) {
+            img.size = NSMakeSize(16, 16);
+            _iconCache[extKey] = img;
+        }
+        return img;
+    }
 
     /* Directories: single shared icon, cache by extension key */
     if (dir_entry_is_dir(entry)) {
