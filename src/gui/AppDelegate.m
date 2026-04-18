@@ -87,9 +87,13 @@ typedef NS_ENUM(NSInteger, ListerState) {
 @property (nonatomic, strong) PreferencesWindowController *preferencesWindow;
 @property (nonatomic, strong) NSMutableArray *remoteBrowsers;   /* active RemoteBrowser controllers */
 @property (nonatomic, strong) ConnectDialogController *connectDialog;
+@property (nonatomic, strong) NSMutableDictionary<NSValue *, NSValue *> *lastListerFrames;
+@property (nonatomic, assign) BOOL suppressSnap;
 
 - (void)refreshAllListersShowing:(NSString *)path;
 - (void)raiseAllListerWindowsExcept:(ListerWindowController *)primary;
+- (void)listerDidMove:(ListerWindowController *)lw;
+- (void)enforceBankBetweenListers;
 - (void)showAlert:(NSString *)title info:(NSString *)info style:(NSAlertStyle)style;
 - (void)performDropOntoLister:(ListerWindowController *)dest
                      fromURLs:(NSArray<NSURL *> *)urls
@@ -1971,6 +1975,14 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     [_appDelegate raiseAllListerWindowsExcept:self];
 }
 
+- (void)windowDidMove:(NSNotification *)notification {
+    [_appDelegate listerDidMove:self];
+}
+
+- (void)windowDidResize:(NSNotification *)notification {
+    [_appDelegate enforceBankBetweenListers];
+}
+
 - (void)windowWillClose:(NSNotification *)notification {
     [_appDelegate listerClosing:self];
 }
@@ -3186,6 +3198,7 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
         [right.window makeKeyAndOrderFront:nil];
         [self attachButtonBankToSource];
         if (showBank) [_buttonBankPanel.window orderFront:nil];
+        [self enforceBankBetweenListers];
     } else {
         NSRect single = NSMakeRect(x, y, totalW, h);
         ListerWindowController *one = [self newListerWindow:leftPath frame:single];
@@ -5473,6 +5486,84 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
         }
         [stack addObjectsFromArray:v.subviews];
     }
+}
+
+/* Rigid-trio snap: when one of the two Listers is dragged, translate the
+ * other by the same delta so the Button Bank keeps sitting exactly in the
+ * gap between them (it's a child window of SOURCE, so it tags along for
+ * free). Mirrors the original DOpus Magellan "workspace moves as one" feel.
+ * No-op for 1 or 3+ visible Listers — the two-pane case is the one users
+ * consistently want tiled. */
+- (void)listerDidMove:(ListerWindowController *)lw {
+    if (_suppressSnap) return;
+    if (!_lastListerFrames) _lastListerFrames = [NSMutableDictionary dictionary];
+
+    NSValue *key = [NSValue valueWithNonretainedObject:lw.window];
+    NSRect newF = lw.window.frame;
+    NSValue *oldVal = _lastListerFrames[key];
+    _lastListerFrames[key] = [NSValue valueWithRect:newF];
+    if (!oldVal) return;   /* first observation — just record */
+
+    /* Collect the currently-visible Listers. We only snap when there are
+     * exactly two so we don't accidentally drag unrelated windows around. */
+    NSMutableArray<ListerWindowController *> *visible = [NSMutableArray array];
+    for (ListerWindowController *l in _listerControllers) {
+        if (l.window.isVisible && !l.window.isMiniaturized) [visible addObject:l];
+    }
+    if (visible.count != 2) return;
+
+    NSRect oldF = oldVal.rectValue;
+    CGFloat dx = newF.origin.x - oldF.origin.x;
+    CGFloat dy = newF.origin.y - oldF.origin.y;
+    if (fabs(dx) < 0.5 && fabs(dy) < 0.5) return;
+
+    _suppressSnap = YES;
+    for (ListerWindowController *other in visible) {
+        if (other == lw) continue;
+        NSRect f = other.window.frame;
+        f.origin.x += dx;
+        f.origin.y += dy;
+        [other.window setFrame:f display:YES animate:NO];
+        _lastListerFrames[[NSValue valueWithNonretainedObject:other.window]] =
+            [NSValue valueWithRect:f];
+    }
+    _suppressSnap = NO;
+}
+
+/* Size the Button Bank to fit exactly in the gap between the two visible
+ * Listers, matching their vertical extent. Called after Lister resize /
+ * Lister close / Button Bank show. No-op for 1 or 3+ Listers. */
+- (void)enforceBankBetweenListers {
+    if (!_buttonBankPanel) return;
+    NSMutableArray<ListerWindowController *> *visible = [NSMutableArray array];
+    for (ListerWindowController *l in _listerControllers) {
+        if (l.window.isVisible && !l.window.isMiniaturized) [visible addObject:l];
+    }
+    if (visible.count != 2) return;
+
+    ListerWindowController *left = visible[0], *right = visible[1];
+    if (left.window.frame.origin.x > right.window.frame.origin.x) {
+        ListerWindowController *t = left; left = right; right = t;
+    }
+    NSRect lf = left.window.frame;
+    NSRect rf = right.window.frame;
+
+    CGFloat minBankW = 80;
+    CGFloat bankX = NSMaxX(lf);
+    CGFloat bankW = rf.origin.x - bankX;
+    _suppressSnap = YES;
+    if (bankW < minBankW) {
+        /* No room — shove the right Lister to open up minBankW worth of gap. */
+        bankW = minBankW;
+        NSRect newR = rf;
+        newR.origin.x = bankX + bankW;
+        [right.window setFrame:newR display:YES animate:NO];
+        _lastListerFrames[[NSValue valueWithNonretainedObject:right.window]] =
+            [NSValue valueWithRect:newR];
+    }
+    NSRect bank = NSMakeRect(bankX, lf.origin.y, bankW, lf.size.height);
+    [_buttonBankPanel.window setFrame:bank display:YES animate:NO];
+    _suppressSnap = NO;
 }
 
 /* When any Lister becomes key, surface every sibling Lister too so the whole
