@@ -3232,6 +3232,24 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     [col addArrangedSubview:[self makeCheckbox:L(@"Delete sends items to Trash (recommended)")
                                            key:@"prefDeleteToTrash" defaultOn:YES]];
 
+    NSTextField *remoteHeader = [NSTextField labelWithString:L(@"Remote transfers (rclone)")];
+    remoteHeader.font = [NSFont boldSystemFontOfSize:13];
+    [col addArrangedSubview:remoteHeader];
+
+    [col addArrangedSubview:[self makeStepperWithLabel:L(@"Parallel file transfers:")
+                                                  key:@"rcloneTransfers"
+                                              defaultValue:8
+                                                  min:1 max:32]];
+    [col addArrangedSubview:[self makeStepperWithLabel:L(@"Streams per large file:")
+                                                  key:@"rcloneMultiThreadStreams"
+                                              defaultValue:8
+                                                  min:1 max:32]];
+    NSTextField *hint = [NSTextField wrappingLabelWithString:
+        L(@"Defaults tuned for Wi-Fi 5 / Wi-Fi 6 Macs. Raise if your link is faster than transfers × speed; lower if the server gets overloaded.")];
+    hint.textColor = [NSColor secondaryLabelColor];
+    hint.font = [NSFont systemFontOfSize:11];
+    [col addArrangedSubview:hint];
+
     /* Footer: Reset button */
     NSButton *reset = [NSButton buttonWithTitle:L(@"Reset All Preferences…")
                                          target:self
@@ -3263,6 +3281,77 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     NSString *key = objc_getAssociatedObject(sender, "prefKey");
     if (!key) return;
     [[NSUserDefaults standardUserDefaults] setBool:(sender.state == NSControlStateValueOn) forKey:key];
+}
+
+/* Label + number field + stepper in a horizontal row, bound to an integer
+ * NSUserDefaults key. Used for rclone transfer tuning where 1–32 is the
+ * useful range. */
+- (NSView *)makeStepperWithLabel:(NSString *)title
+                             key:(NSString *)key
+                    defaultValue:(NSInteger)defaultVal
+                             min:(NSInteger)minV max:(NSInteger)maxV {
+    NSUserDefaults *u = [NSUserDefaults standardUserDefaults];
+    NSInteger current = [u integerForKey:key];
+    if (current <= 0) current = defaultVal;
+
+    NSView *row = [[NSView alloc] init];
+    row.translatesAutoresizingMaskIntoConstraints = NO;
+
+    NSTextField *lbl = [NSTextField labelWithString:title];
+    lbl.translatesAutoresizingMaskIntoConstraints = NO;
+    [row addSubview:lbl];
+
+    NSTextField *field = [[NSTextField alloc] init];
+    field.integerValue = current;
+    field.translatesAutoresizingMaskIntoConstraints = NO;
+    [row addSubview:field];
+
+    NSStepper *stepper = [[NSStepper alloc] init];
+    stepper.minValue = minV; stepper.maxValue = maxV;
+    stepper.integerValue = current;
+    stepper.translatesAutoresizingMaskIntoConstraints = NO;
+    [row addSubview:stepper];
+
+    objc_setAssociatedObject(stepper, "prefKey", key, OBJC_ASSOCIATION_COPY);
+    objc_setAssociatedObject(field,   "prefKey", key, OBJC_ASSOCIATION_COPY);
+    objc_setAssociatedObject(stepper, "pairField",   field, OBJC_ASSOCIATION_ASSIGN);
+    objc_setAssociatedObject(field,   "pairStepper", stepper, OBJC_ASSOCIATION_ASSIGN);
+
+    stepper.target = self;
+    stepper.action = @selector(stepperChanged:);
+    field.target = self;
+    field.action = @selector(stepperFieldChanged:);
+
+    [NSLayoutConstraint activateConstraints:@[
+        [lbl.leadingAnchor  constraintEqualToAnchor:row.leadingAnchor],
+        [lbl.centerYAnchor  constraintEqualToAnchor:row.centerYAnchor],
+        [field.leadingAnchor constraintEqualToAnchor:lbl.trailingAnchor constant:8],
+        [field.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [field.widthAnchor   constraintEqualToConstant:50],
+        [stepper.leadingAnchor constraintEqualToAnchor:field.trailingAnchor constant:4],
+        [stepper.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [stepper.trailingAnchor constraintLessThanOrEqualToAnchor:row.trailingAnchor],
+        [row.heightAnchor constraintEqualToConstant:24],
+    ]];
+    return row;
+}
+
+- (void)stepperChanged:(NSStepper *)sender {
+    NSString *key = objc_getAssociatedObject(sender, "prefKey");
+    NSTextField *field = objc_getAssociatedObject(sender, "pairField");
+    field.integerValue = sender.integerValue;
+    [[NSUserDefaults standardUserDefaults] setInteger:sender.integerValue forKey:key];
+}
+
+- (void)stepperFieldChanged:(NSTextField *)sender {
+    NSString *key = objc_getAssociatedObject(sender, "prefKey");
+    NSStepper *stepper = objc_getAssociatedObject(sender, "pairStepper");
+    NSInteger v = sender.integerValue;
+    if (v < stepper.minValue) v = (NSInteger)stepper.minValue;
+    if (v > stepper.maxValue) v = (NSInteger)stepper.maxValue;
+    sender.integerValue = v;
+    stepper.integerValue = v;
+    [[NSUserDefaults standardUserDefaults] setInteger:v forKey:key];
 }
 
 - (void)resetAction:(id)sender {
@@ -6075,9 +6164,22 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
                   progress:(void (^)(NSString *line))progress
                 completion:(void (^)(int status))completion {
     NSString *src = [NSString stringWithFormat:@"%@%@", remoteSpec, remotePath];
+    NSUserDefaults *u = [NSUserDefaults standardUserDefaults];
+    /* Defaults tuned for a typical Mac on modern Wi-Fi (802.11ac / Wi-Fi 6)
+     * where a single SMB/SFTP stream leaves throughput on the table.
+     * transfers=8 doubles parallel file copies (matters with many small
+     * files); multi-thread-streams=8 splits a single large file across
+     * 8 TCP streams so big videos saturate the link.
+     * Both overridable via Preferences → File operations. */
+    NSInteger transfers = [u integerForKey:@"rcloneTransfers"];
+    if (transfers <= 0) transfers = 8;
+    NSInteger streams   = [u integerForKey:@"rcloneMultiThreadStreams"];
+    if (streams <= 0) streams = 8;
     NSArray<NSString *> *args = @[@"copy", src, localDir,
                                    @"--progress", @"--stats=1s",
-                                   @"--transfers=4"];
+                                   [NSString stringWithFormat:@"--transfers=%ld", (long)transfers],
+                                   [NSString stringWithFormat:@"--multi-thread-streams=%ld", (long)streams],
+                                   @"--multi-thread-cutoff=128M"];
     NSTask *t = [self _taskWithArgs:args];
     if (!t) { completion(-1); return nil; }
     NSPipe *out = [NSPipe pipe];
