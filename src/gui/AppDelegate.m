@@ -38,7 +38,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
 /* Forward-declared remote UI classes — full implementations near the bottom
  * of the file. The @interface is declared here (not @class) so the AppDelegate
  * can read the `.window` property from NSWindowController. */
-@interface ConnectDialogController : NSWindowController
+@interface ConnectDialogController : NSWindowController <NSTableViewDataSource, NSTableViewDelegate, NSNetServiceBrowserDelegate, NSNetServiceDelegate>
 @property (nonatomic, copy) void (^onConnect)(NSString *displayName,
                                                NSString *rcloneSpec,
                                                NSString *startPath);
@@ -5448,45 +5448,87 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     NSTextField *_pathField;
     NSTextField *_statusLabel;
     NSButton *_connectBtn;
+    NSTableView *_sideTable;
+    /* sidebarRows: flat mix of header strings (NSString) and entry dicts.
+     * Section headers are unselectable and render in small caps. Entry dicts
+     * have keys: host, port, user, source ("nearby" or "saved"), displayName. */
+    NSMutableArray *_sidebarRows;
+    NSMutableArray<NSDictionary *> *_discovered;   /* live NSNetService results */
+    NSNetServiceBrowser *_browser;
+    NSMutableArray<NSNetService *> *_resolving;
 }
 
 - (instancetype)init {
-    NSRect frame = NSMakeRect(0, 0, 520, 360);
+    NSRect frame = NSMakeRect(0, 0, 760, 480);
     NSPanel *panel = [[NSPanel alloc] initWithContentRect:frame
         styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable)
         backing:NSBackingStoreBuffered defer:NO];
     panel.title = L(@"Connect to Server");
     self = [super initWithWindow:panel];
     if (!self) return nil;
+    _sidebarRows = [NSMutableArray array];
+    _discovered  = [NSMutableArray array];
+    _resolving   = [NSMutableArray array];
 
     NSView *c = panel.contentView;
 
     NSTextField *hdr = [NSTextField labelWithString:L(@"Connect to Server")];
     hdr.font = [NSFont boldSystemFontOfSize:14];
-    hdr.frame = NSMakeRect(20, 326, 480, 22);
+    hdr.frame = NSMakeRect(20, 446, 720, 22);
     [c addSubview:hdr];
 
     NSTextField *sub = [NSTextField wrappingLabelWithString:
         L(@"Currently supports SFTP (SSH file transfer). Uses the bundled rclone helper — no external install needed. SMB and cloud storage arrive in v1.7.")];
     sub.textColor = [NSColor secondaryLabelColor];
     sub.font = [NSFont systemFontOfSize:11];
-    sub.frame = NSMakeRect(20, 280, 480, 40);
+    sub.frame = NSMakeRect(20, 408, 720, 34);
     [c addSubview:sub];
 
-    CGFloat y = 240;
+    /* Left sidebar — scrollable NSTableView with Nearby + Saved rows. */
+    NSScrollView *sideScroll = [[NSScrollView alloc] initWithFrame:NSMakeRect(20, 64, 260, 336)];
+    sideScroll.borderType = NSBezelBorder;
+    sideScroll.hasVerticalScroller = YES;
+    _sideTable = [[NSTableView alloc] init];
+    _sideTable.headerView = nil;
+    _sideTable.allowsEmptySelection = YES;
+    _sideTable.rowHeight = 24;
+    _sideTable.dataSource = self;
+    _sideTable.delegate = self;
+    _sideTable.intercellSpacing = NSMakeSize(0, 0);
+    _sideTable.backgroundColor = [NSColor clearColor];
+    _sideTable.usesAlternatingRowBackgroundColors = NO;
+    _sideTable.style = NSTableViewStyleSourceList;
+    NSTableColumn *col = [[NSTableColumn alloc] initWithIdentifier:@"row"];
+    col.width = 240;
+    [_sideTable addTableColumn:col];
+    _sideTable.action = @selector(sidebarClicked:);
+    _sideTable.target = self;
+    /* Context menu for Saved rows → Remove. */
+    NSMenu *sideMenu = [[NSMenu alloc] init];
+    [sideMenu addItemWithTitle:L(@"Remove") action:@selector(removeSavedAction:) keyEquivalent:@""].target = self;
+    _sideTable.menu = sideMenu;
+    sideScroll.documentView = _sideTable;
+    [c addSubview:sideScroll];
+
+    /* Right form — host / port / user / pass / path. */
+    CGFloat fx = 300;    /* form-column x */
+    CGFloat flw = 100;   /* label width */
+    CGFloat fiw = 340;   /* input width */
+
+    CGFloat y = 370;
     NSArray<NSString *> *labels = @[L(@"Host:"), L(@"Port:"), L(@"User:"), L(@"Password:"), L(@"Remote path:")];
     NSMutableArray<NSTextField *> *fields = [NSMutableArray array];
     for (NSUInteger i = 0; i < labels.count; i++) {
         NSTextField *lbl = [NSTextField labelWithString:labels[i]];
         lbl.alignment = NSTextAlignmentRight;
-        lbl.frame = NSMakeRect(20, y, 100, 22);
+        lbl.frame = NSMakeRect(fx, y, flw, 22);
         [c addSubview:lbl];
         NSTextField *tf = (i == 3)
-            ? (NSTextField *)[[NSSecureTextField alloc] initWithFrame:NSMakeRect(128, y - 2, 372, 24)]
-            : [[NSTextField alloc] initWithFrame:NSMakeRect(128, y - 2, 372, 24)];
+            ? (NSTextField *)[[NSSecureTextField alloc] initWithFrame:NSMakeRect(fx + flw + 8, y - 2, fiw, 24)]
+            : [[NSTextField alloc] initWithFrame:NSMakeRect(fx + flw + 8, y - 2, fiw, 24)];
         [c addSubview:tf];
         [fields addObject:tf];
-        y -= 32;
+        y -= 36;
     }
     _hostField = fields[0]; _hostField.placeholderString = @"e.g. fileserver.local";
     _portField = fields[1]; _portField.placeholderString = @"22 (default)";
@@ -5497,24 +5539,206 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     _statusLabel = [NSTextField labelWithString:@""];
     _statusLabel.textColor = [NSColor secondaryLabelColor];
     _statusLabel.font = [NSFont systemFontOfSize:11];
-    _statusLabel.frame = NSMakeRect(20, 56, 360, 20);
+    _statusLabel.frame = NSMakeRect(fx, 64, fiw + flw + 8, 20);
     _statusLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
     [c addSubview:_statusLabel];
 
     NSButton *cancel = [NSButton buttonWithTitle:L(@"Cancel") target:self action:@selector(cancel:)];
     cancel.keyEquivalent = @"\033";
     cancel.bezelStyle = NSBezelStyleRounded;
-    cancel.frame = NSMakeRect(300, 16, 100, 32);
+    cancel.frame = NSMakeRect(540, 16, 100, 32);
     [c addSubview:cancel];
 
     _connectBtn = [NSButton buttonWithTitle:L(@"Connect") target:self action:@selector(connect:)];
     _connectBtn.keyEquivalent = @"\r";
     _connectBtn.bezelStyle = NSBezelStyleRounded;
-    _connectBtn.frame = NSMakeRect(408, 16, 100, 32);
+    _connectBtn.frame = NSMakeRect(648, 16, 100, 32);
     [c addSubview:_connectBtn];
 
     panel.initialFirstResponder = _hostField;
+
+    [self rebuildSidebar];
+    [self startBonjour];
     return self;
+}
+
+- (void)dealloc {
+    [self stopBonjour];
+}
+
+#pragma mark Sidebar data
+
++ (NSArray<NSDictionary *> *)savedConnections {
+    return [[NSUserDefaults standardUserDefaults] arrayForKey:@"sftpSavedConnections"] ?: @[];
+}
+
++ (void)rememberConnection:(NSDictionary *)conn {
+    NSMutableArray *all = [[self savedConnections] mutableCopy] ?: [NSMutableArray array];
+    /* Dedup by host+user+port. */
+    NSString *key = [NSString stringWithFormat:@"%@@%@:%@", conn[@"user"] ?: @"", conn[@"host"] ?: @"", conn[@"port"] ?: @""];
+    for (NSDictionary *c in [all copy]) {
+        NSString *k = [NSString stringWithFormat:@"%@@%@:%@", c[@"user"] ?: @"", c[@"host"] ?: @"", c[@"port"] ?: @""];
+        if ([k isEqualToString:key]) [all removeObject:c];
+    }
+    [all insertObject:conn atIndex:0];  /* most recent first */
+    if (all.count > 20) [all removeObjectsInRange:NSMakeRange(20, all.count - 20)];
+    [[NSUserDefaults standardUserDefaults] setObject:all forKey:@"sftpSavedConnections"];
+}
+
+- (void)rebuildSidebar {
+    [_sidebarRows removeAllObjects];
+    [_sidebarRows addObject:L(@"NEARBY")];
+    if (_discovered.count == 0) {
+        [_sidebarRows addObject:@{@"placeholder": L(@"Scanning…")}];
+    } else {
+        for (NSDictionary *d in _discovered) [_sidebarRows addObject:d];
+    }
+    NSArray *saved = [ConnectDialogController savedConnections];
+    [_sidebarRows addObject:L(@"SAVED")];
+    if (saved.count == 0) {
+        [_sidebarRows addObject:@{@"placeholder": L(@"No saved connections yet")}];
+    } else {
+        for (NSDictionary *s in saved) [_sidebarRows addObject:s];
+    }
+    [_sideTable reloadData];
+}
+
+#pragma mark Bonjour discovery
+
+- (void)startBonjour {
+    _browser = [[NSNetServiceBrowser alloc] init];
+    _browser.delegate = self;
+    /* _ssh._tcp is the standard advertisement for SSH/SFTP. Catches macOS with
+     * Remote Login enabled + most Linux NAS boxes that register via Avahi. */
+    [_browser searchForServicesOfType:@"_ssh._tcp." inDomain:@"local."];
+}
+
+- (void)stopBonjour {
+    [_browser stop];
+    _browser.delegate = nil;
+    _browser = nil;
+    for (NSNetService *s in _resolving) { s.delegate = nil; [s stop]; }
+    [_resolving removeAllObjects];
+}
+
+- (void)netServiceBrowser:(NSNetServiceBrowser *)b
+            didFindService:(NSNetService *)service
+                moreComing:(BOOL)moreComing {
+    service.delegate = self;
+    [_resolving addObject:service];
+    [service resolveWithTimeout:5.0];
+    if (!moreComing) [self rebuildSidebar];
+}
+
+- (void)netServiceBrowser:(NSNetServiceBrowser *)b
+          didRemoveService:(NSNetService *)service
+                moreComing:(BOOL)moreComing {
+    NSString *name = service.name;
+    [_discovered filterUsingPredicate:
+        [NSPredicate predicateWithBlock:^BOOL(NSDictionary *d, NSDictionary *bd) {
+            return ![d[@"displayName"] isEqualToString:name];
+        }]];
+    if (!moreComing) [self rebuildSidebar];
+}
+
+- (void)netServiceDidResolveAddress:(NSNetService *)service {
+    NSString *host = service.hostName;
+    if ([host hasSuffix:@"."]) host = [host substringToIndex:host.length - 1];
+    if (!host.length) return;
+    NSDictionary *d = @{
+        @"displayName": service.name ?: host,
+        @"host":        host,
+        @"port":        @(service.port).stringValue,
+        @"user":        @"",
+        @"source":      @"nearby",
+    };
+    /* Dedup by host. */
+    for (NSDictionary *e in [_discovered copy]) {
+        if ([e[@"host"] isEqualToString:host]) return;
+    }
+    [_discovered addObject:d];
+    [self rebuildSidebar];
+}
+
+- (void)netService:(NSNetService *)s didNotResolve:(NSDictionary *)err {
+    s.delegate = nil;
+    [_resolving removeObject:s];
+}
+
+#pragma mark NSTableViewDataSource / Delegate
+
+- (NSInteger)numberOfRowsInTableView:(NSTableView *)tableView {
+    return _sidebarRows.count;
+}
+
+- (BOOL)tableView:(NSTableView *)tableView shouldSelectRow:(NSInteger)row {
+    id item = _sidebarRows[row];
+    if ([item isKindOfClass:[NSString class]]) return NO;
+    if ([item isKindOfClass:[NSDictionary class]] && ((NSDictionary *)item)[@"placeholder"]) return NO;
+    return YES;
+}
+
+- (NSView *)tableView:(NSTableView *)tv
+    viewForTableColumn:(NSTableColumn *)col
+                   row:(NSInteger)row {
+    id item = _sidebarRows[row];
+    NSTableCellView *cell = [[NSTableCellView alloc] initWithFrame:NSMakeRect(0, 0, col.width, 24)];
+    NSTextField *tf = [[NSTextField alloc] initWithFrame:NSMakeRect(10, 0, col.width - 12, 24)];
+    tf.bordered = NO; tf.drawsBackground = NO; tf.editable = NO; tf.selectable = NO;
+    tf.autoresizingMask = NSViewWidthSizable;
+    if ([item isKindOfClass:[NSString class]]) {
+        tf.stringValue = (NSString *)item;
+        tf.font = [NSFont systemFontOfSize:10 weight:NSFontWeightSemibold];
+        tf.textColor = [NSColor secondaryLabelColor];
+    } else {
+        NSDictionary *d = item;
+        if (d[@"placeholder"]) {
+            tf.stringValue = d[@"placeholder"];
+            tf.font = [NSFont systemFontOfSize:12];
+            tf.textColor = [NSColor tertiaryLabelColor];
+        } else {
+            NSString *user = d[@"user"] ?: @"";
+            NSString *host = d[@"host"] ?: @"";
+            NSString *disp = user.length ? [NSString stringWithFormat:@"%@@%@", user, host] : host;
+            tf.stringValue = disp;
+            tf.font = [NSFont systemFontOfSize:12];
+            tf.textColor = [NSColor labelColor];
+        }
+    }
+    cell.textField = tf;
+    [cell addSubview:tf];
+    return cell;
+}
+
+- (void)sidebarClicked:(id)sender {
+    NSInteger row = _sideTable.clickedRow;
+    if (row < 0 || row >= (NSInteger)_sidebarRows.count) return;
+    id item = _sidebarRows[row];
+    if (![item isKindOfClass:[NSDictionary class]]) return;
+    NSDictionary *d = item;
+    if (d[@"placeholder"]) return;
+    _hostField.stringValue = d[@"host"] ?: @"";
+    _portField.stringValue = d[@"port"] ?: @"";
+    _userField.stringValue = d[@"user"] ?: @"";
+    if (d[@"path"]) _pathField.stringValue = d[@"path"];
+    [self.window makeFirstResponder:_passField];
+}
+
+- (void)removeSavedAction:(id)sender {
+    NSInteger row = _sideTable.clickedRow;
+    if (row < 0 || row >= (NSInteger)_sidebarRows.count) return;
+    id item = _sidebarRows[row];
+    if (![item isKindOfClass:[NSDictionary class]]) return;
+    NSDictionary *d = item;
+    if (![d[@"source"] isEqualToString:@"saved"]) return;   /* only saved rows are removable */
+    NSMutableArray *all = [[ConnectDialogController savedConnections] mutableCopy];
+    NSString *key = [NSString stringWithFormat:@"%@@%@:%@", d[@"user"] ?: @"", d[@"host"] ?: @"", d[@"port"] ?: @""];
+    for (NSDictionary *c in [all copy]) {
+        NSString *k = [NSString stringWithFormat:@"%@@%@:%@", c[@"user"] ?: @"", c[@"host"] ?: @"", c[@"port"] ?: @""];
+        if ([k isEqualToString:key]) [all removeObject:c];
+    }
+    [[NSUserDefaults standardUserDefaults] setObject:all forKey:@"sftpSavedConnections"];
+    [self rebuildSidebar];
 }
 
 - (void)cancel:(id)sender {
@@ -5551,6 +5775,12 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
             }
             (void)entries;
             NSString *display = [NSString stringWithFormat:@"%@@%@", user, host];
+            /* Remember the connection (minus password — that's per-session). */
+            [ConnectDialogController rememberConnection:@{
+                @"host": host, @"port": port ?: @"", @"user": user,
+                @"path": path, @"source": @"saved",
+                @"displayName": display,
+            }];
             NSWindow *parent = self.window.sheetParent;
             [parent endSheet:self.window returnCode:NSModalResponseOK];
             [self.window close];

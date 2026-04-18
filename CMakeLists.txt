@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(idopus VERSION 1.6.0 LANGUAGES C)
+project(idopus VERSION 1.6.1 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -69,6 +69,8 @@ if(APPLE)
         MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
         MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
         MACOSX_BUNDLE_COPYRIGHT "Copyright 2026 Jon Bylund. Original (c) GP Software / Jonathan Potter."
+        MACOSX_BUNDLE_EXECUTABLE_NAME "iDOpus"
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/resources/Info.plist.in"
     )
 
     # Bundle rclone helper binary if it's been fetched into third_party/rclone/.
