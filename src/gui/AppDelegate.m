@@ -6116,6 +6116,110 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     _smbBrowser.delegate = self;
     [_smbBrowser searchForServicesOfType:@"_smb._tcp." inDomain:@"local."];
     [self startPortScan];
+    [self loadKnownHosts];
+}
+
+/* Harvest hosts the user has already interacted with elsewhere on the Mac —
+ * no typing required. Catches cases Bonjour/port-scan miss (different
+ * subnet, no PTR, or just a domain name in ~/.ssh/config). Sources:
+ *   ~/.ssh/known_hosts  — every host the user has SSH'd to
+ *   ~/.ssh/config       — explicit Host/HostName entries (skip wildcards)
+ *   /etc/hosts          — non-loopback entries */
+- (void)loadKnownHosts {
+    NSMutableSet<NSString *> *names = [NSMutableSet set];
+
+    NSString *kh = [@"~/.ssh/known_hosts" stringByExpandingTildeInPath];
+    NSString *khData = [NSString stringWithContentsOfFile:kh encoding:NSUTF8StringEncoding error:nil];
+    for (NSString *raw in [khData componentsSeparatedByString:@"\n"]) {
+        NSString *line = [raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        if (!line.length || [line hasPrefix:@"#"]) continue;
+        if ([line hasPrefix:@"|1|"]) continue;   /* HashKnownHosts — can't recover name */
+        NSArray *parts = [line componentsSeparatedByString:@" "];
+        if (parts.count < 2) continue;
+        for (NSString *h in [parts[0] componentsSeparatedByString:@","]) {
+            NSString *hh = h;
+            /* Strip [host]:port wrapping. */
+            if ([hh hasPrefix:@"["]) {
+                NSRange r = [hh rangeOfString:@"]"];
+                if (r.location != NSNotFound && r.location > 1)
+                    hh = [hh substringWithRange:NSMakeRange(1, r.location - 1)];
+            }
+            /* Skip bare IPs — we already port-scan those. The goal here is
+             * to surface *named* hosts the scan misses. */
+            if (hh.length && ![self _isBareIP:hh]) [names addObject:hh];
+        }
+    }
+
+    NSString *cfg = [@"~/.ssh/config" stringByExpandingTildeInPath];
+    NSString *cfgData = [NSString stringWithContentsOfFile:cfg encoding:NSUTF8StringEncoding error:nil];
+    NSString *pendingHost = nil;
+    for (NSString *raw in [cfgData componentsSeparatedByString:@"\n"]) {
+        NSString *line = [raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        if (!line.length || [line hasPrefix:@"#"]) continue;
+        NSArray *parts = [[line componentsSeparatedByString:@" "]
+            filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"length > 0"]];
+        if (parts.count < 2) continue;
+        NSString *kw = [parts[0] lowercaseString];
+        if ([kw isEqualToString:@"host"]) {
+            for (NSUInteger i = 1; i < parts.count; i++) {
+                NSString *h = parts[i];
+                /* Skip wildcards — they're patterns, not real hostnames. */
+                if ([h containsString:@"*"] || [h containsString:@"?"]) continue;
+                if (![self _isBareIP:h]) [names addObject:h];
+                pendingHost = h;
+            }
+        } else if ([kw isEqualToString:@"hostname"] && parts.count >= 2) {
+            if (![self _isBareIP:parts[1]]) [names addObject:parts[1]];
+        }
+    }
+    (void)pendingHost;
+
+    NSString *hostsData = [NSString stringWithContentsOfFile:@"/etc/hosts"
+                                                    encoding:NSUTF8StringEncoding error:nil];
+    for (NSString *raw in [hostsData componentsSeparatedByString:@"\n"]) {
+        NSString *line = [raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        if (!line.length || [line hasPrefix:@"#"]) continue;
+        NSArray *parts = [[line componentsSeparatedByString:@" "]
+            filteredArrayUsingPredicate:[NSPredicate predicateWithFormat:@"length > 0"]];
+        if (parts.count < 2) continue;
+        NSString *ip = parts[0];
+        if ([ip isEqualToString:@"127.0.0.1"] || [ip isEqualToString:@"::1"] ||
+            [ip hasPrefix:@"fe80"] || [ip isEqualToString:@"255.255.255.255"]) continue;
+        for (NSUInteger i = 1; i < parts.count; i++) {
+            NSString *h = parts[i];
+            if (h.length && ![h isEqualToString:@"localhost"] &&
+                ![self _isBareIP:h]) [names addObject:h];
+        }
+    }
+
+    /* Surface each named host under both SFTP and SMB — we don't know which
+     * one it actually speaks until the user tries. Dedupe against any
+     * existing discovered entry with the same host+protocol. */
+    for (NSString *name in names) {
+        [self _addKnownHost:name protocol:@"sftp"];
+        [self _addKnownHost:name protocol:@"smb"];
+    }
+    [self rebuildSidebar];
+}
+
+- (BOOL)_isBareIP:(NSString *)s {
+    struct in_addr a;
+    return inet_pton(AF_INET, s.UTF8String, &a) == 1;
+}
+
+- (void)_addKnownHost:(NSString *)host protocol:(NSString *)proto {
+    for (NSDictionary *e in _discovered) {
+        if ([e[@"host"] isEqualToString:host] &&
+            [e[@"protocol"] isEqualToString:proto]) return;
+    }
+    [_discovered addObject:@{
+        @"displayName": host,
+        @"host":        host,
+        @"port":        [proto isEqualToString:@"smb"] ? @"445" : @"22",
+        @"user":        @"",
+        @"source":      @"nearby",
+        @"protocol":    proto,
+    }];
 }
 
 /* Parallel non-blocking connect() to port 22 across the local /24 subnet(s).
