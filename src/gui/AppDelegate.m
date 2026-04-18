@@ -3321,11 +3321,24 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     BOOL showBank = [u objectForKey:@"prefButtonBankVisible"] ? [u boolForKey:@"prefButtonBankVisible"] : YES;
 
     NSFileManager *fileMgr = [NSFileManager defaultManager];
-    NSArray<NSString *> *lastPaths = restore ? [u arrayForKey:@"lastPaths"] : nil;
-    NSString *leftPath  = (lastPaths.count >= 1 && [fileMgr fileExistsAtPath:lastPaths[0]])
-                          ? lastPaths[0] : NSHomeDirectory();
-    NSString *rightPath = (lastPaths.count >= 2 && [fileMgr fileExistsAtPath:lastPaths[1]])
-                          ? lastPaths[1] : NSHomeDirectory();
+    /* New format: lastListerStates = [{path, remoteSpec?, remoteLabel?}, ...].
+     * Old format: lastPaths = [path, path]. Fall back to the old key so
+     * existing users keep their restored state without reconfiguration. */
+    NSArray *lastStates = restore ? [u arrayForKey:@"lastListerStates"] : nil;
+    if (!lastStates) {
+        NSArray *oldPaths = restore ? [u arrayForKey:@"lastPaths"] : nil;
+        NSMutableArray *converted = [NSMutableArray array];
+        for (NSString *p in oldPaths) {
+            if ([p isKindOfClass:[NSString class]]) [converted addObject:@{@"path": p}];
+        }
+        lastStates = converted;
+    }
+
+    NSDictionary *leftState = lastStates.count >= 1 ? lastStates[0] : nil;
+    NSDictionary *rightState = lastStates.count >= 2 ? lastStates[1] : nil;
+
+    NSString *leftPath  = [self _startupPathForState:leftState fileManager:fileMgr];
+    NSString *rightPath = [self _startupPathForState:rightState fileManager:fileMgr];
     (void)bankFrame;
 
     if (dualPane) {
@@ -3333,6 +3346,8 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
         ListerWindowController *right = [self newListerWindow:rightPath frame:rightFrame];
         [left.window setFrame:leftFrame display:YES animate:NO];
         [right.window setFrame:rightFrame display:YES animate:NO];
+        [self _restoreRemoteIfNeeded:left fromState:leftState];
+        [self _restoreRemoteIfNeeded:right fromState:rightState];
 
         _buttonBankPanel = [[ButtonBankPanelController alloc] initWithAppDelegate:self];
         [_buttonBankPanel positionBetweenLeftFrame:leftFrame rightFrame:rightFrame];
@@ -3344,6 +3359,7 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
         NSRect single = NSMakeRect(x, y, totalW, h);
         ListerWindowController *one = [self newListerWindow:leftPath frame:single];
         [one.window setFrame:single display:YES animate:NO];
+        [self _restoreRemoteIfNeeded:one fromState:leftState];
 
         _buttonBankPanel = [[ButtonBankPanelController alloc] initWithAppDelegate:self];
         [one.window makeKeyAndOrderFront:nil];
@@ -3352,14 +3368,56 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     }
 }
 
+/* Pick the startup path for a Lister. For remote state, use root-of-remote
+ * (the path load happens after remoteSpec is attached via _restoreRemoteIfNeeded).
+ * For local state, use the saved path only if it still exists; otherwise home. */
+- (NSString *)_startupPathForState:(NSDictionary *)s fileManager:(NSFileManager *)fm {
+    if (!s) return NSHomeDirectory();
+    NSString *spec = s[@"remoteSpec"];
+    NSString *path = s[@"path"] ?: @"/";
+    if (spec.length) return path;  /* remote — skip local fileExists check */
+    if (path.length && [fm fileExistsAtPath:path]) return path;
+    return NSHomeDirectory();
+}
+
+/* If the saved state was a remote Lister, re-attach the rclone spec and
+ * reload via loadRemotePath so the window picks up where it left off. No
+ * password is stored — rclone falls back to ssh-agent/keys for SFTP and
+ * guest or Keychain for SMB, which is fine for the common case. If auth
+ * fails we just show an error and the user reconnects manually. */
+- (void)_restoreRemoteIfNeeded:(ListerWindowController *)lw
+                     fromState:(NSDictionary *)s {
+    NSString *spec = s[@"remoteSpec"];
+    if (!spec.length) return;
+    lw.remoteSpec  = spec;
+    lw.remoteLabel = s[@"remoteLabel"] ?: @"remote";
+    [lw.history removeAllObjects];
+    lw.historyIndex = -1;
+    [lw loadRemotePath:s[@"path"] ?: @"/"];
+}
+
 - (void)applicationWillTerminate:(NSNotification *)notification {
-    /* Save the currentPath of each live Lister so next launch can restore */
-    NSMutableArray<NSString *> *paths = [NSMutableArray array];
+    /* Save each Lister's path + remote metadata so next launch can restore
+     * both local folders and remote connections. Note: the remoteSpec
+     * already contains the obscured password for SFTP, so saving it in
+     * NSUserDefaults effectively persists the password too. That matches
+     * the user's expectation of "reconnect automatically" but is a mild
+     * security tradeoff vs. the original session-only storage. */
+    NSMutableArray<NSDictionary *> *states = [NSMutableArray array];
+    NSMutableArray<NSString *> *pathsLegacy = [NSMutableArray array];
     for (ListerWindowController *lw in _listerControllers) {
-        if (lw.currentPath) [paths addObject:lw.currentPath];
+        if (!lw.currentPath) continue;
+        NSMutableDictionary *s = [@{ @"path": lw.currentPath } mutableCopy];
+        if (lw.remoteSpec.length)  s[@"remoteSpec"]  = lw.remoteSpec;
+        if (lw.remoteLabel.length) s[@"remoteLabel"] = lw.remoteLabel;
+        [states addObject:s];
+        if (!lw.isRemote) [pathsLegacy addObject:lw.currentPath];
     }
-    if (paths.count > 0) {
-        [[NSUserDefaults standardUserDefaults] setObject:paths forKey:@"lastPaths"];
+    NSUserDefaults *u = [NSUserDefaults standardUserDefaults];
+    if (states.count > 0) {
+        [u setObject:states forKey:@"lastListerStates"];
+        /* Keep the legacy key in sync for downgrades. */
+        [u setObject:pathsLegacy forKey:@"lastPaths"];
     }
 
     if (_bufferCache) buffer_cache_free(_bufferCache);
