@@ -207,6 +207,7 @@
 "Download"                = "Ladda ner";
 "Some items could not be downloaded. See JobsPanel log for details." = "Några objekt kunde inte laddas ner. Se jobbpanelen för detaljer.";
 "NEARBY"                  = "I NÄRHETEN";
+"DISCOVERED"              = "HITTADE";
 "SAVED"                   = "SPARADE";
 "Scanning…"               = "Söker…";
 "No saved connections yet" = "Inga sparade anslutningar än";

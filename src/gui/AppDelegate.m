@@ -6432,6 +6432,9 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
      * this is set so Connect can reuse it without re-prompting. Cleared if
      * the user types anything fresh in the password field. */
     NSString *_savedObscured;
+    /* DISCOVERED section starts collapsed so the sidebar is dominated by the
+     * user's own SAVED entries; the auto-discovered pile is one click away. */
+    BOOL _discoveredCollapsed;
 }
 
 - (instancetype)init {
@@ -6445,6 +6448,7 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     _sidebarRows = [NSMutableArray array];
     _discovered  = [NSMutableArray array];
     _resolving   = [NSMutableArray array];
+    _discoveredCollapsed = YES;   /* start collapsed — SAVED is the focus */
 
     NSView *c = panel.contentView;
 
@@ -6606,18 +6610,30 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
 
 - (void)rebuildSidebar {
     [_sidebarRows removeAllObjects];
-    [_sidebarRows addObject:L(@"NEARBY")];
-    if (_discovered.count == 0) {
-        [_sidebarRows addObject:@{@"placeholder": L(@"Scanning…")}];
-    } else {
-        for (NSDictionary *d in _discovered) [_sidebarRows addObject:d];
-    }
+
+    /* SAVED first — it's what the user typically wants to reconnect to. */
     NSArray *saved = [ConnectDialogController savedConnections];
     [_sidebarRows addObject:L(@"SAVED")];
     if (saved.count == 0) {
         [_sidebarRows addObject:@{@"placeholder": L(@"No saved connections yet")}];
     } else {
         for (NSDictionary *s in saved) [_sidebarRows addObject:s];
+    }
+
+    /* DISCOVERED (was "NEARBY") — collapsible so the raw auto-probe results
+     * don't clutter the list. Header row is itself a dict so it can carry
+     * the collapse state for rendering. */
+    NSString *arrow = _discoveredCollapsed ? @"▸" : @"▾";
+    NSString *headerLabel = [NSString stringWithFormat:@"%@ %@ (%lu)",
+                              arrow, L(@"DISCOVERED"),
+                              (unsigned long)_discovered.count];
+    [_sidebarRows addObject:@{ @"discoveredHeader": headerLabel }];
+    if (!_discoveredCollapsed) {
+        if (_discovered.count == 0) {
+            [_sidebarRows addObject:@{@"placeholder": L(@"Scanning…")}];
+        } else {
+            for (NSDictionary *d in _discovered) [_sidebarRows addObject:d];
+        }
     }
     [_sideTable reloadData];
 }
@@ -6990,7 +7006,12 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
 - (BOOL)tableView:(NSTableView *)tableView shouldSelectRow:(NSInteger)row {
     id item = _sidebarRows[row];
     if ([item isKindOfClass:[NSString class]]) return NO;
-    if ([item isKindOfClass:[NSDictionary class]] && ((NSDictionary *)item)[@"placeholder"]) return NO;
+    if ([item isKindOfClass:[NSDictionary class]]) {
+        NSDictionary *d = item;
+        if (d[@"placeholder"]) return NO;
+        /* DISCOVERED header row IS selectable so clicking toggles collapse. */
+        return YES;
+    }
     return YES;
 }
 
@@ -7008,7 +7029,11 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
         tf.textColor = [NSColor secondaryLabelColor];
     } else {
         NSDictionary *d = item;
-        if (d[@"placeholder"]) {
+        if (d[@"discoveredHeader"]) {
+            tf.stringValue = d[@"discoveredHeader"];
+            tf.font = [NSFont systemFontOfSize:10 weight:NSFontWeightSemibold];
+            tf.textColor = [NSColor secondaryLabelColor];
+        } else if (d[@"placeholder"]) {
             tf.stringValue = d[@"placeholder"];
             tf.font = [NSFont systemFontOfSize:12];
             tf.textColor = [NSColor tertiaryLabelColor];
@@ -7035,6 +7060,11 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     id item = _sidebarRows[row];
     if (![item isKindOfClass:[NSDictionary class]]) return;
     NSDictionary *d = item;
+    if (d[@"discoveredHeader"]) {
+        _discoveredCollapsed = !_discoveredCollapsed;
+        [self rebuildSidebar];
+        return;
+    }
     if (d[@"placeholder"]) return;
     NSString *proto = d[@"protocol"] ?: @"sftp";
     NSString *host  = d[@"host"] ?: @"";

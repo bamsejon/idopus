@@ -209,6 +209,7 @@
 "Download"                = "Download";
 "Some items could not be downloaded. See JobsPanel log for details." = "Some items could not be downloaded. See JobsPanel log for details.";
 "NEARBY"                  = "NEARBY";
+"DISCOVERED"              = "DISCOVERED";
 "SAVED"                   = "SAVED";
 "Scanning…"               = "Scanning…";
 "No saved connections yet" = "No saved connections yet";
