@@ -182,3 +182,6 @@
 "Save a reusable sync definition. Run it later from Functions → Sync." = "Save a reusable sync definition. Run it later from Functions → Sync.";
 "Name, source and destination are all required." = "Name, source and destination are all required.";
 "Run"                     = "Run";
+"Empty folder"            = "Empty folder";
+"No items match the filter." = "No items match the filter.";
+"Folder"                  = "Folder";

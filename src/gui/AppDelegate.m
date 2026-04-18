@@ -50,6 +50,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
                      fromURLs:(NSArray<NSURL *> *)urls
                        asMove:(BOOL)isMove;
 - (NSString *)uniqueChild:(NSString *)name inDir:(NSString *)dir;
+- (void)refreshButtonBankEnablement;
 @end
 
 @interface IDOpusAppDelegate ()
@@ -303,6 +304,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
 @property (nonatomic, strong) NSSearchField *findField;
 @property (nonatomic, strong) NSLayoutConstraint *findHeightConstraint;
 @property (nonatomic, assign) FSEventStreamRef fsStream;
+@property (nonatomic, strong) NSTextField *emptyStateLabel;
 - (void)setState:(ListerState)state;
 - (void)goBack:(id)sender;
 - (void)goForward:(id)sender;
@@ -593,6 +595,35 @@ typedef NS_ENUM(NSInteger, ListerState) {
 
 - (void)tableViewSelectionDidChange:(NSNotification *)notification {
     [_owner updateStatusBar];
+    [_owner.appDelegate refreshButtonBankEnablement];
+}
+
+/* Row tooltip — name, size, kind, modified date. Shown on hover. */
+- (NSString *)tableView:(NSTableView *)tableView
+         toolTipForCell:(NSCell *)cell
+                   rect:(NSRectPointer)rect
+            tableColumn:(NSTableColumn *)tc
+                    row:(NSInteger)row
+          mouseLocation:(NSPoint)mouseLocation {
+    dir_entry_t *entry = _buffer ? dir_buffer_get_entry(_buffer, (int)row) : NULL;
+    if (!entry || !entry->name) return nil;
+    NSString *name = [NSString stringWithUTF8String:entry->name];
+    NSString *sizeStr;
+    if (dir_entry_is_dir(entry)) {
+        sizeStr = NSLocalizedString(@"Folder", nil);
+    } else {
+        char buf[32];
+        pal_format_size(entry->size, buf, sizeof(buf));
+        sizeStr = [NSString stringWithUTF8String:buf];
+    }
+    char dateBuf[32];
+    pal_format_date(entry->date_modified, dateBuf, sizeof(dateBuf));
+    NSString *dateStr = [NSString stringWithUTF8String:dateBuf];
+    const char *ext = pal_path_extension(entry->name);
+    NSString *kind = ext && *ext ? [NSString stringWithUTF8String:ext] : @"";
+    if (kind.length)
+        return [NSString stringWithFormat:@"%@\n%@ · %@\n%@", name, sizeStr, kind, dateStr];
+    return [NSString stringWithFormat:@"%@\n%@\n%@", name, sizeStr, dateStr];
 }
 
 #pragma mark NSTextFieldDelegate (inline rename)
@@ -825,10 +856,20 @@ typedef NS_ENUM(NSInteger, ListerState) {
     extract.target = self;
     extract.tag = 1;  /* identify for menuNeedsUpdate */
     [menu addItem:[NSMenuItem separatorItem]];
-    [menu addItemWithTitle:L(@"Info")           action:@selector(infoAction:)    keyEquivalent:@""].target = _appDelegate;
-    [menu addItemWithTitle:L(@"Rename…")        action:@selector(renameAction:)  keyEquivalent:@""].target = _appDelegate;
+    /* F-key hints — these keyEquivalents are DISPLAY-ONLY since context menus
+     * are not part of the main menu hierarchy. The real key handling lives in
+     * the Functions menu items. */
+    unichar f3 = NSF3FunctionKey, f9 = NSF9FunctionKey, f8 = NSF8FunctionKey;
+    NSMenuItem *infoItem = [menu addItemWithTitle:L(@"Info")    action:@selector(infoAction:)   keyEquivalent:[NSString stringWithCharacters:&f9 length:1]];
+    infoItem.target = _appDelegate;
+    infoItem.keyEquivalentModifierMask = 0;
+    NSMenuItem *renameItem = [menu addItemWithTitle:L(@"Rename…") action:@selector(renameAction:) keyEquivalent:[NSString stringWithCharacters:&f3 length:1]];
+    renameItem.target = _appDelegate;
+    renameItem.keyEquivalentModifierMask = 0;
     [menu addItem:[NSMenuItem separatorItem]];
-    [menu addItemWithTitle:L(@"Move to Trash")  action:@selector(deleteAction:)  keyEquivalent:@""].target = _appDelegate;
+    NSMenuItem *trashItem = [menu addItemWithTitle:L(@"Move to Trash") action:@selector(deleteAction:) keyEquivalent:[NSString stringWithCharacters:&f8 length:1]];
+    trashItem.target = _appDelegate;
+    trashItem.keyEquivalentModifierMask = 0;
     _tableView.menu = menu;
 
     /* Drag-and-drop — accept file URLs from anywhere (other Listers or Finder) */
@@ -840,6 +881,22 @@ typedef NS_ENUM(NSInteger, ListerState) {
 
     scrollView.documentView = _tableView;
     [content addSubview:scrollView];
+
+    /* Empty-state overlay — shown when the table has zero entries. Appears
+     * centered above the scroll view so the user gets a hint rather than an
+     * empty grid of rows. Visibility toggled in updateStatusBar after reload. */
+    _emptyStateLabel = [NSTextField wrappingLabelWithString:L(@"Empty folder")];
+    _emptyStateLabel.font = [NSFont systemFontOfSize:14 weight:NSFontWeightMedium];
+    _emptyStateLabel.textColor = [NSColor tertiaryLabelColor];
+    _emptyStateLabel.alignment = NSTextAlignmentCenter;
+    _emptyStateLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    _emptyStateLabel.hidden = YES;
+    [content addSubview:_emptyStateLabel];
+    [NSLayoutConstraint activateConstraints:@[
+        [_emptyStateLabel.centerXAnchor constraintEqualToAnchor:scrollView.centerXAnchor],
+        [_emptyStateLabel.centerYAnchor constraintEqualToAnchor:scrollView.centerYAnchor],
+        [_emptyStateLabel.widthAnchor   constraintLessThanOrEqualToConstant:320],
+    ]];
 
     /* Button bank (DOpus-style row of text buttons between path field and file list) */
     NSStackView *bank = [[NSStackView alloc] init];
@@ -1130,6 +1187,19 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     _statusBar.stringValue = [NSString stringWithFormat:
         @"%@%d files, %d dirs (%s) — %s free",
         prefix, buf->stats.total_files, buf->stats.total_dirs, sizeStr, freeStr];
+
+    /* Empty-state: different message when the directory is actually empty vs.
+     * when a filter has hidden everything (the underlying directory contents
+     * aren't tracked here, but the per-buffer filter suppresses non-matches). */
+    BOOL empty = (buf->stats.total_entries == 0);
+    _emptyStateLabel.hidden = !empty;
+    if (empty) {
+        NSString *filter = [[NSUserDefaults standardUserDefaults] stringForKey:@"filterShow"];
+        BOOL hasFilter = filter.length > 0;
+        _emptyStateLabel.stringValue = hasFilter
+            ? L(@"No items match the filter.")
+            : L(@"Empty folder");
+    }
 }
 
 #pragma mark Actions
@@ -3251,6 +3321,7 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     }
 
     [self attachButtonBankToSource];
+    [self refreshButtonBankEnablement];
 }
 
 - (void)listerClosing:(ListerWindowController *)ctrl {
@@ -3258,6 +3329,7 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     if (_activeDest == ctrl) _activeDest = nil;
     [_listerControllers removeObject:ctrl];
     [self attachButtonBankToSource];
+    [self refreshButtonBankEnablement];
 }
 
 - (void)showPreferencesAction:(id)sender {
@@ -5081,6 +5153,84 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
         }
         keepAlive = nil;
     }];
+}
+
+#pragma mark Contextual enablement
+
+/* Check whether `sel` can be fired meaningfully right now. Used both by
+ * validateMenuItem: (for the Functions + context menus) and by
+ * refreshButtonBankEnablement (for Button Bank buttons). Keeping the logic
+ * in one place avoids drift between menu and button greyout. */
+- (BOOL)canPerformAction:(SEL)sel {
+    ListerWindowController *op = [self operatingLister];
+    NSUInteger selCount = op ? op.selectedPaths.count : 0;
+    BOOL haveSource = _activeSource != nil;
+    BOOL haveDest = _activeDest != nil && _activeDest != _activeSource;
+
+    if (sel == @selector(copyAction:) || sel == @selector(moveAction:)) {
+        NSUInteger srcSelCount = _activeSource ? _activeSource.selectedPaths.count : 0;
+        return haveSource && haveDest && srcSelCount > 0;
+    }
+    if (sel == @selector(deleteAction:) ||
+        sel == @selector(infoAction:) ||
+        sel == @selector(copyToAction:) ||
+        sel == @selector(moveToAction:) ||
+        sel == @selector(duplicateAction:) ||
+        sel == @selector(compressAction:) ||
+        sel == @selector(extractAction:) ||
+        sel == @selector(openSelectionAction:) ||
+        sel == @selector(revealInFinderAction:) ||
+        sel == @selector(openInTerminalAction:) ||
+        sel == @selector(copyPathAction:)) {
+        return selCount > 0;
+    }
+    if (sel == @selector(renameAction:)) {
+        return selCount == 1;
+    }
+    if (sel == @selector(allAction:) || sel == @selector(noneAction:)) {
+        return op != nil && op.tableView.numberOfRows > 0;
+    }
+    if (sel == @selector(makeDirAction:) ||
+        sel == @selector(filterAction:) ||
+        sel == @selector(parentAction:) ||
+        sel == @selector(rootAction:) ||
+        sel == @selector(refreshAction:) ||
+        sel == @selector(selectPatternAction:) ||
+        sel == @selector(compareSourceWithDestAction:)) {
+        return op != nil;
+    }
+    if (sel == @selector(syncSourceToDestAction:)) {
+        return haveSource && haveDest;
+    }
+    /* Unknown selectors: default to enabled so we don't accidentally lock the
+     * user out of a new action that hasn't been wired here yet. */
+    return YES;
+}
+
+- (BOOL)validateMenuItem:(NSMenuItem *)item {
+    return [self canPerformAction:item.action];
+}
+
+/* Walk every NSButton inside the Button Bank and set enabled based on the
+ * same rules the menus use, so the user sees what's actionable right now
+ * without having to try-and-fail. Called on selection / source / dest / path
+ * changes. Cheap — the bank has ~12 buttons. */
+- (void)refreshButtonBankEnablement {
+    if (!_buttonBankPanel) return;
+    NSView *root = _buttonBankPanel.window.contentView;
+    NSMutableArray<NSView *> *stack = [NSMutableArray arrayWithObject:root];
+    while (stack.count) {
+        NSView *v = stack.lastObject;
+        [stack removeLastObject];
+        if ([v isKindOfClass:[NSButton class]]) {
+            NSButton *b = (NSButton *)v;
+            if (b.action && b.tag != 1) {
+                /* tag 1 = custom shell-command button; leave enabled always */
+                b.enabled = [self canPerformAction:b.action];
+            }
+        }
+        [stack addObjectsFromArray:v.subviews];
+    }
 }
 
 @end

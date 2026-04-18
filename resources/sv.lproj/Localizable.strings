@@ -182,3 +182,6 @@
 "Save a reusable sync definition. Run it later from Functions → Sync." = "Spara en återanvändbar synkdefinition. Kör den senare från Funktioner → Synka.";
 "Name, source and destination are all required." = "Namn, källa och mål är alla obligatoriska.";
 "Run"                     = "Kör";
+"Empty folder"            = "Tom mapp";
+"No items match the filter." = "Inga objekt matchar filtret.";
+"Folder"                  = "Mapp";
