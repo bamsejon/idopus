@@ -5909,6 +5909,7 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
  * a starting path on OK. Password is obscured via rclone before being embedded
  * in the spec so it's not trivially readable by anyone seeing the command line. */
 @implementation ConnectDialogController {
+    NSPopUpButton *_protocolPopup;
     NSTextField *_hostField;
     NSTextField *_portField;
     NSTextField *_userField;
@@ -5919,10 +5920,12 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     NSTableView *_sideTable;
     /* sidebarRows: flat mix of header strings (NSString) and entry dicts.
      * Section headers are unselectable and render in small caps. Entry dicts
-     * have keys: host, port, user, source ("nearby" or "saved"), displayName. */
+     * have keys: host, port, user, source ("nearby" or "saved"), displayName,
+     * protocol ("sftp" or "smb"). */
     NSMutableArray *_sidebarRows;
     NSMutableArray<NSDictionary *> *_discovered;   /* live NSNetService results */
-    NSNetServiceBrowser *_browser;
+    NSNetServiceBrowser *_sshBrowser;
+    NSNetServiceBrowser *_smbBrowser;
     NSMutableArray<NSNetService *> *_resolving;
 }
 
@@ -5946,7 +5949,7 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     [c addSubview:hdr];
 
     NSTextField *sub = [NSTextField wrappingLabelWithString:
-        L(@"Currently supports SFTP (SSH file transfer). Uses the bundled rclone helper — no external install needed. SMB and cloud storage arrive in v1.7.")];
+        L(@"Supports SFTP (SSH file transfer) and SMB (Windows/Samba shares). Uses the bundled rclone helper — no external install needed. Cloud storage arrives in v1.8.")];
     sub.textColor = [NSColor secondaryLabelColor];
     sub.font = [NSFont systemFontOfSize:11];
     sub.frame = NSMakeRect(20, 408, 720, 34);
@@ -5978,12 +5981,25 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     sideScroll.documentView = _sideTable;
     [c addSubview:sideScroll];
 
-    /* Right form — host / port / user / pass / path. */
+    /* Right form — protocol / host / port / user / pass / path. */
     CGFloat fx = 300;    /* form-column x */
     CGFloat flw = 100;   /* label width */
     CGFloat fiw = 340;   /* input width */
 
-    CGFloat y = 370;
+    /* Protocol picker at the top. Changing it updates the port placeholder
+     * so the user sees a sensible default (22 for SFTP, 445 for SMB). */
+    NSTextField *protoLbl = [NSTextField labelWithString:L(@"Protocol:")];
+    protoLbl.alignment = NSTextAlignmentRight;
+    protoLbl.frame = NSMakeRect(fx, 376, flw, 22);
+    [c addSubview:protoLbl];
+    _protocolPopup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(fx + flw + 8, 372, 180, 26)];
+    [_protocolPopup addItemWithTitle:@"SFTP"];
+    [_protocolPopup addItemWithTitle:@"SMB"];
+    _protocolPopup.target = self;
+    _protocolPopup.action = @selector(protocolChanged:);
+    [c addSubview:_protocolPopup];
+
+    CGFloat y = 336;
     NSArray<NSString *> *labels = @[L(@"Host:"), L(@"Port:"), L(@"User:"), L(@"Password:"), L(@"Remote path:")];
     NSMutableArray<NSTextField *> *fields = [NSMutableArray array];
     for (NSUInteger i = 0; i < labels.count; i++) {
@@ -6003,6 +6019,15 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     _userField = fields[2]; _userField.placeholderString = NSUserName();
     _passField = (NSSecureTextField *)fields[3];
     _pathField = fields[4]; _pathField.placeholderString = @"/ (root)";
+
+    /* Explicit tab chain so Tab moves from Host → Port → User → Password →
+     * Path → Host. AppKit's auto-chain sometimes skips NSSecureTextField
+     * when fields are created bare in a for-loop. */
+    _hostField.nextKeyView = _portField;
+    _portField.nextKeyView = _userField;
+    _userField.nextKeyView = _passField;
+    _passField.nextKeyView = _pathField;
+    _pathField.nextKeyView = _hostField;
 
     _statusLabel = [NSTextField labelWithString:@""];
     _statusLabel.textColor = [NSColor secondaryLabelColor];
@@ -6074,13 +6099,16 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
 #pragma mark Bonjour + port-scan discovery
 
 - (void)startBonjour {
-    _browser = [[NSNetServiceBrowser alloc] init];
-    _browser.delegate = self;
-    /* _ssh._tcp is the standard advertisement for SSH/SFTP. Catches macOS with
-     * Remote Login enabled + most Linux NAS boxes that register via Avahi.
-     * Linux machines that have sshd but *don't* advertise via Avahi won't
-     * show up here — the port scan below catches those. */
-    [_browser searchForServicesOfType:@"_ssh._tcp." inDomain:@"local."];
+    _sshBrowser = [[NSNetServiceBrowser alloc] init];
+    _sshBrowser.delegate = self;
+    /* _ssh._tcp catches macOS with Remote Login enabled and Linux boxes that
+     * register via Avahi; _smb._tcp catches file-sharing servers. Machines
+     * that run sshd/smbd but don't advertise via Avahi are caught by the
+     * parallel port scan below. */
+    [_sshBrowser searchForServicesOfType:@"_ssh._tcp." inDomain:@"local."];
+    _smbBrowser = [[NSNetServiceBrowser alloc] init];
+    _smbBrowser.delegate = self;
+    [_smbBrowser searchForServicesOfType:@"_smb._tcp." inDomain:@"local."];
     [self startPortScan];
 }
 
@@ -6117,17 +6145,27 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
         for (uint32_t h = 1; h <= 254; h++) {
             if (h == myHost) continue;
             uint32_t target = net24 | h;
-            dispatch_async(q, ^{
-                if ([weakSelf _probeHost:target port:22]) {
-                    struct in_addr a = { .s_addr = htonl(target) };
-                    char buf[INET_ADDRSTRLEN];
-                    inet_ntop(AF_INET, &a, buf, sizeof(buf));
-                    NSString *ipStr = [NSString stringWithUTF8String:buf];
-                    dispatch_async(dispatch_get_main_queue(), ^{
-                        [weakSelf _addScanHit:ipStr];
-                    });
-                }
-            });
+            /* Probe both SSH (22) and SMB (445). A host may answer on either
+             * or both — we register each hit as its own sidebar entry. */
+            struct { uint16_t port; NSString *proto; } probes[] = {
+                { 22,  @"sftp" },
+                { 445, @"smb"  },
+            };
+            for (size_t i = 0; i < sizeof(probes)/sizeof(probes[0]); i++) {
+                uint16_t port = probes[i].port;
+                NSString *proto = probes[i].proto;
+                dispatch_async(q, ^{
+                    if ([weakSelf _probeHost:target port:port]) {
+                        struct in_addr a = { .s_addr = htonl(target) };
+                        char buf[INET_ADDRSTRLEN];
+                        inet_ntop(AF_INET, &a, buf, sizeof(buf));
+                        NSString *ipStr = [NSString stringWithUTF8String:buf];
+                        dispatch_async(dispatch_get_main_queue(), ^{
+                            [weakSelf _addScanHit:ipStr port:port protocol:proto];
+                        });
+                    }
+                });
+            }
         }
     }
     /* Pure fire-and-forget: the dialog stays interactive while results trickle in. */
@@ -6163,19 +6201,21 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
 }
 
 /* Record a port-scan hit in the _discovered array. Dedupes against any
- * Bonjour-resolved entry with the same host. Show the IP immediately, then
- * upgrade the displayName once reverse-DNS returns — don't block the sidebar
- * on DNS latency. */
-- (void)_addScanHit:(NSString *)ip {
+ * Bonjour-resolved entry with the same host *and* protocol — a single host
+ * can legitimately have both an SSH and an SMB entry. Show the IP
+ * immediately, then upgrade the displayName once reverse-DNS returns. */
+- (void)_addScanHit:(NSString *)ip port:(uint16_t)port protocol:(NSString *)proto {
     for (NSDictionary *e in _discovered) {
-        if ([e[@"host"] isEqualToString:ip]) return;
+        if ([e[@"host"] isEqualToString:ip] &&
+            [e[@"protocol"] isEqualToString:proto]) return;
     }
     NSMutableDictionary *entry = [@{
         @"displayName": ip,
         @"host":        ip,
-        @"port":        @"22",
+        @"port":        [NSString stringWithFormat:@"%u", port],
         @"user":        @"",
         @"source":      @"nearby",
+        @"protocol":    proto,
     } mutableCopy];
     [_discovered addObject:entry];
     [self rebuildSidebar];
@@ -6186,13 +6226,12 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
         if (!name.length || [name isEqualToString:ip]) return;
         dispatch_async(dispatch_get_main_queue(), ^{
             typeof(self) s = weakSelf; if (!s) return;
-            /* Locate the still-present entry by IP (it may have been displaced
-             * by a later Bonjour hit, which is fine — just skip). */
             for (NSUInteger i = 0; i < s->_discovered.count; i++) {
                 NSMutableDictionary *d = [s->_discovered[i] mutableCopy];
-                if ([d[@"host"] isEqualToString:ip]) {
+                if ([d[@"host"] isEqualToString:ip] &&
+                    [d[@"protocol"] isEqualToString:proto]) {
                     d[@"displayName"] = name;
-                    d[@"host"] = name;   /* prefer name for rclone spec */
+                    d[@"host"] = name;
                     s->_discovered[i] = d;
                     [s rebuildSidebar];
                     break;
@@ -6220,9 +6259,8 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
 }
 
 - (void)stopBonjour {
-    [_browser stop];
-    _browser.delegate = nil;
-    _browser = nil;
+    [_sshBrowser stop]; _sshBrowser.delegate = nil; _sshBrowser = nil;
+    [_smbBrowser stop]; _smbBrowser.delegate = nil; _smbBrowser = nil;
     for (NSNetService *s in _resolving) { s.delegate = nil; [s stop]; }
     [_resolving removeAllObjects];
 }
@@ -6231,6 +6269,12 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
             didFindService:(NSNetService *)service
                 moreComing:(BOOL)moreComing {
     service.delegate = self;
+    /* Tag the service with its originating protocol so resolveAddress knows
+     * how to label the sidebar entry — NSNetService itself only carries the
+     * raw service type, which we'd have to parse. */
+    BOOL isSMB = (b == _smbBrowser);
+    objc_setAssociatedObject(service, "idopusProto", isSMB ? @"smb" : @"sftp",
+                              OBJC_ASSOCIATION_RETAIN);
     [_resolving addObject:service];
     [service resolveWithTimeout:5.0];
     if (!moreComing) [self rebuildSidebar];
@@ -6251,16 +6295,19 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     NSString *host = service.hostName;
     if ([host hasSuffix:@"."]) host = [host substringToIndex:host.length - 1];
     if (!host.length) return;
+    NSString *proto = objc_getAssociatedObject(service, "idopusProto") ?: @"sftp";
     NSDictionary *d = @{
         @"displayName": service.name ?: host,
         @"host":        host,
         @"port":        @(service.port).stringValue,
         @"user":        @"",
         @"source":      @"nearby",
+        @"protocol":    proto,
     };
-    /* Dedup by host. */
+    /* Dedup by host + protocol — the same host might advertise both ssh and smb. */
     for (NSDictionary *e in [_discovered copy]) {
-        if ([e[@"host"] isEqualToString:host]) return;
+        if ([e[@"host"] isEqualToString:host] &&
+            [e[@"protocol"] isEqualToString:proto]) return;
     }
     [_discovered addObject:d];
     [self rebuildSidebar];
@@ -6305,7 +6352,10 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
         } else {
             NSString *user = d[@"user"] ?: @"";
             NSString *host = d[@"host"] ?: @"";
-            NSString *disp = user.length ? [NSString stringWithFormat:@"%@@%@", user, host] : host;
+            NSString *proto = d[@"protocol"] ?: @"sftp";
+            NSString *base = user.length ? [NSString stringWithFormat:@"%@@%@", user, host] : host;
+            NSString *disp = [NSString stringWithFormat:@"%@  %@",
+                               [proto uppercaseString], base];
             tf.stringValue = disp;
             tf.font = [NSFont systemFontOfSize:12];
             tf.textColor = [NSColor labelColor];
@@ -6323,6 +6373,9 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     if (![item isKindOfClass:[NSDictionary class]]) return;
     NSDictionary *d = item;
     if (d[@"placeholder"]) return;
+    NSString *proto = d[@"protocol"] ?: @"sftp";
+    [_protocolPopup selectItemWithTitle:[proto isEqualToString:@"smb"] ? @"SMB" : @"SFTP"];
+    [self protocolChanged:nil];
     _hostField.stringValue = d[@"host"] ?: @"";
     _portField.stringValue = d[@"port"] ?: @"";
     _userField.stringValue = d[@"user"] ?: @"";
@@ -6352,6 +6405,16 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     [self.window close];
 }
 
+- (void)protocolChanged:(id)sender {
+    BOOL smb = [self _isSMB];
+    _portField.placeholderString = smb ? @"445 (default)" : @"22 (default)";
+    _pathField.placeholderString = smb ? @"share/subpath" : @"/ (root)";
+}
+
+- (BOOL)_isSMB {
+    return [_protocolPopup.selectedItem.title isEqualToString:@"SMB"];
+}
+
 - (void)connect:(id)sender {
     NSString *host = [_hostField.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
     if (!host.length) { _statusLabel.stringValue = L(@"Host is required."); return; }
@@ -6365,32 +6428,39 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     _connectBtn.enabled = NO;
     _statusLabel.stringValue = L(@"Probing…");
 
+    BOOL smb = [self _isSMB];
+    NSString *proto = smb ? @"smb" : @"sftp";
     /* If the user supplied a password, obscure it via rclone first so it's
      * not a clear-text argv entry. Otherwise assume ssh-agent / key auth. */
     void (^build)(NSString *) = ^(NSString *obscured) {
-        NSMutableString *spec = [NSMutableString stringWithFormat:@":sftp,host=%@,user=%@", host, user];
+        NSMutableString *spec = [NSMutableString stringWithFormat:@":%@,host=%@,user=%@", proto, host, user];
         if (port.length) [spec appendFormat:@",port=%@", port];
         if (obscured.length) [spec appendFormat:@",pass=%@", obscured];
         [spec appendString:@":"];
+        /* SMB paths are share-relative: "share/subpath". rclone lsjson wants
+         * "/share/subpath" so prepend a slash if the user didn't. SFTP paths
+         * are plain filesystem paths and already handled above. */
+        NSString *probe = path;
+        if (smb && ![probe hasPrefix:@"/"]) probe = [@"/" stringByAppendingString:probe];
         /* Smoke-test by listing the target path — confirms auth + reachability. */
-        [IDOpusRclone listRemote:spec path:path completion:^(NSArray *entries, NSError *err) {
+        [IDOpusRclone listRemote:spec path:probe completion:^(NSArray *entries, NSError *err) {
             if (err) {
                 self->_connectBtn.enabled = YES;
                 self->_statusLabel.stringValue = err.localizedDescription ?: L(@"Connection failed");
                 return;
             }
             (void)entries;
-            NSString *display = [NSString stringWithFormat:@"%@@%@", user, host];
+            NSString *display = [NSString stringWithFormat:@"%@ %@@%@", [proto uppercaseString], user, host];
             /* Remember the connection (minus password — that's per-session). */
             [ConnectDialogController rememberConnection:@{
                 @"host": host, @"port": port ?: @"", @"user": user,
-                @"path": path, @"source": @"saved",
+                @"path": path, @"protocol": proto, @"source": @"saved",
                 @"displayName": display,
             }];
             NSWindow *parent = self.window.sheetParent;
             [parent endSheet:self.window returnCode:NSModalResponseOK];
             [self.window close];
-            if (self.onConnect) self.onConnect(display, spec, path);
+            if (self.onConnect) self.onConnect(display, spec, probe);
         }];
     };
     if (pass.length) {
