@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(idopus VERSION 1.0.0 LANGUAGES C)
+project(idopus VERSION 1.1.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -40,7 +40,21 @@ target_link_libraries(core_test PRIVATE core pal)
 
 # --- GUI app (macOS only) ---
 if(APPLE)
-    add_executable(idopus MACOSX_BUNDLE src/gui/AppDelegate.m)
+    # Localization resources — Base (English) + Swedish + whatever else is in resources/
+    file(GLOB LOCALIZATION_DIRS RELATIVE ${CMAKE_SOURCE_DIR}/resources
+         ${CMAKE_SOURCE_DIR}/resources/*.lproj)
+    set(LOCALIZATION_FILES "")
+    foreach(lproj ${LOCALIZATION_DIRS})
+        set(src ${CMAKE_SOURCE_DIR}/resources/${lproj}/Localizable.strings)
+        list(APPEND LOCALIZATION_FILES ${src})
+        set_source_files_properties(${src} PROPERTIES
+            MACOSX_PACKAGE_LOCATION Resources/${lproj})
+    endforeach()
+
+    add_executable(idopus MACOSX_BUNDLE
+        src/gui/AppDelegate.m
+        ${LOCALIZATION_FILES}
+    )
     target_compile_options(idopus PRIVATE "-fobjc-arc")
     target_link_libraries(idopus PRIVATE core pal
         "-framework Cocoa"

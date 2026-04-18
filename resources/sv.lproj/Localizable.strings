@@ -1,0 +1,135 @@
+/* iDOpus — Svenska. */
+
+/* --- App-menyn --- */
+"About iDOpus"        = "Om iDOpus";
+"Preferences…"        = "Inställningar…";
+"Quit iDOpus"         = "Avsluta iDOpus";
+
+/* --- Arkiv-menyn --- */
+"File"                = "Arkiv";
+"New Lister"          = "Ny Lister";
+"New File…"           = "Ny fil…";
+"New Tab"             = "Ny flik";
+"Split Display"       = "Dela vyn";
+"Back"                = "Tillbaka";
+"Forward"             = "Framåt";
+"Find"                = "Sök";
+"Go to Path…"         = "Gå till sökväg…";
+"Close"               = "Stäng";
+
+/* --- Funktioner-menyn --- */
+"Functions"           = "Funktioner";
+"Rename"              = "Byt namn";
+"Copy"                = "Kopiera";
+"Move"                = "Flytta";
+"MakeDir"             = "Ny mapp";
+"Delete"              = "Radera";
+"Info"                = "Info";
+"Filter…"             = "Filter…";
+"Select By Pattern…"  = "Markera via mönster…";
+"Compare With Destination" = "Jämför med mål";
+"Add Custom Button…"  = "Lägg till egen knapp…";
+"Edit Custom Button…" = "Redigera egen knapp…";
+"Remove Custom Button…" = "Ta bort egen knapp…";
+"Add File Type Action…"    = "Lägg till åtgärd för filtyp…";
+"Remove File Type Action…" = "Ta bort åtgärd för filtyp…";
+
+/* --- Bokmärken-menyn --- */
+"Bookmarks"           = "Bokmärken";
+"Home"                = "Hem";
+"Desktop"             = "Skrivbord";
+"Documents"           = "Dokument";
+"Downloads"           = "Hämtat";
+"Applications"        = "Program";
+"Pictures"            = "Bilder";
+"Movies"              = "Filmer";
+"Music"               = "Musik";
+"Devices"             = "Enheter";
+"Add Current…"        = "Lägg till aktuell…";
+"Remove Bookmark…"    = "Ta bort bokmärke…";
+
+/* --- Visa-menyn --- */
+"View"                = "Visa";
+"Show Hidden Files"   = "Visa dolda filer";
+"Sort By"             = "Sortera efter";
+"Name"                = "Namn";
+"Size"                = "Storlek";
+"Date"                = "Datum";
+"Type"                = "Typ";
+"Reverse"             = "Omvänd";
+"Files Mixed"         = "Blanda filer";
+"Show Columns"        = "Visa kolumner";
+"Quick Look"          = "Snabbtitt";
+"Show/Hide Buttons"   = "Visa/Dölj knappar";
+
+/* --- Fönster-menyn --- */
+"Window"              = "Fönster";
+"Minimize"            = "Minimera";
+"Zoom"                = "Zooma";
+"Bring All to Front"  = "Lägg alla överst";
+
+/* --- Lister-knappar --- */
+"Parent"              = "Förälder";
+"Root"                = "Rot";
+"Refresh"             = "Uppdatera";
+"Filter"              = "Filter";
+"All"                 = "Alla";
+"None"                = "Inga";
+"SOURCE"              = "KÄLLA";
+"DEST"                = "MÅL";
+"OFF"                 = "AV";
+
+/* --- Kontextmeny --- */
+"Open"                = "Öppna";
+"Open With"           = "Öppna med";
+"Other…"              = "Annat…";
+"Reveal in Finder"    = "Visa i Finder";
+"Open in Terminal"    = "Öppna i Terminal";
+"Copy Path"           = "Kopiera sökväg";
+"Duplicate"           = "Duplicera";
+"Compress"            = "Komprimera";
+"Extract"             = "Packa upp";
+"Copy to…"            = "Kopiera till…";
+"Move to…"            = "Flytta till…";
+"Rename…"             = "Byt namn…";
+"Move to Trash"       = "Flytta till papperskorgen";
+"Actions"             = "Åtgärder";
+
+/* --- Dialoger --- */
+"OK"                  = "OK";
+"Cancel"              = "Avbryt";
+"Add"                 = "Lägg till";
+"Save"                = "Spara";
+"Create"              = "Skapa";
+"Edit"                = "Redigera";
+"Edit…"               = "Redigera…";
+"Remove"              = "Ta bort";
+"Replace"             = "Ersätt";
+"Skip"                = "Hoppa över";
+"Keep Both"           = "Behåll båda";
+"Cancel All"          = "Avbryt alla";
+"Merge"               = "Slå ihop";
+"Calculating size…"   = "Beräknar storlek…";
+"Copying…"            = "Kopierar…";
+"Moving…"             = "Flyttar…";
+"Cancelling…"         = "Avbryter…";
+"No items selected."  = "Inget är markerat.";
+"Select exactly one item to rename." = "Markera exakt ett objekt för att byta namn.";
+"Path"                = "Sökväg";
+"Title"               = "Titel";
+"Command"             = "Kommando";
+"Extension"           = "Filändelse";
+"Default action (runs on double-click)" = "Standardåtgärd (körs vid dubbelklick)";
+"Apply to all remaining conflicts" = "Tillämpa på alla återstående konflikter";
+"Choose App…"         = "Välj program…";
+
+/* --- Inställningar --- */
+"Preferences"         = "Inställningar";
+"General"             = "Allmänt";
+"File operations"     = "Filoperationer";
+"Hide dotfiles by default"            = "Dölj dotfiles som standard";
+"Restore last-open paths at launch"   = "Återställ senaste sökvägar vid start";
+"Open dual-pane at launch"            = "Öppna två paneler vid start";
+"Show Button Bank at launch"          = "Visa knappraden vid start";
+"Delete sends items to Trash (recommended)" = "Radera skickar till papperskorgen (rekommenderas)";
+"Reset All Preferences…"              = "Återställ alla inställningar…";

@@ -1,0 +1,135 @@
+/* iDOpus — English (base). Keys are the English source strings. */
+
+/* --- App menu --- */
+"About iDOpus"        = "About iDOpus";
+"Preferences…"        = "Preferences…";
+"Quit iDOpus"         = "Quit iDOpus";
+
+/* --- File menu --- */
+"File"                = "File";
+"New Lister"          = "New Lister";
+"New File…"           = "New File…";
+"New Tab"             = "New Tab";
+"Split Display"       = "Split Display";
+"Back"                = "Back";
+"Forward"             = "Forward";
+"Find"                = "Find";
+"Go to Path…"         = "Go to Path…";
+"Close"               = "Close";
+
+/* --- Functions menu --- */
+"Functions"           = "Functions";
+"Rename"              = "Rename";
+"Copy"                = "Copy";
+"Move"                = "Move";
+"MakeDir"             = "MakeDir";
+"Delete"              = "Delete";
+"Info"                = "Info";
+"Filter…"             = "Filter…";
+"Select By Pattern…"  = "Select By Pattern…";
+"Compare With Destination" = "Compare With Destination";
+"Add Custom Button…"  = "Add Custom Button…";
+"Edit Custom Button…" = "Edit Custom Button…";
+"Remove Custom Button…" = "Remove Custom Button…";
+"Add File Type Action…"    = "Add File Type Action…";
+"Remove File Type Action…" = "Remove File Type Action…";
+
+/* --- Bookmarks menu --- */
+"Bookmarks"           = "Bookmarks";
+"Home"                = "Home";
+"Desktop"             = "Desktop";
+"Documents"           = "Documents";
+"Downloads"           = "Downloads";
+"Applications"        = "Applications";
+"Pictures"            = "Pictures";
+"Movies"              = "Movies";
+"Music"               = "Music";
+"Devices"             = "Devices";
+"Add Current…"        = "Add Current…";
+"Remove Bookmark…"    = "Remove Bookmark…";
+
+/* --- View menu --- */
+"View"                = "View";
+"Show Hidden Files"   = "Show Hidden Files";
+"Sort By"             = "Sort By";
+"Name"                = "Name";
+"Size"                = "Size";
+"Date"                = "Date";
+"Type"                = "Type";
+"Reverse"             = "Reverse";
+"Files Mixed"         = "Files Mixed";
+"Show Columns"        = "Show Columns";
+"Quick Look"          = "Quick Look";
+"Show/Hide Buttons"   = "Show/Hide Buttons";
+
+/* --- Window menu --- */
+"Window"              = "Window";
+"Minimize"            = "Minimize";
+"Zoom"                = "Zoom";
+"Bring All to Front"  = "Bring All to Front";
+
+/* --- Lister buttons / toolbar --- */
+"Parent"              = "Parent";
+"Root"                = "Root";
+"Refresh"             = "Refresh";
+"Filter"              = "Filter";
+"All"                 = "All";
+"None"                = "None";
+"SOURCE"              = "SOURCE";
+"DEST"                = "DEST";
+"OFF"                 = "OFF";
+
+/* --- Context menu --- */
+"Open"                = "Open";
+"Open With"           = "Open With";
+"Other…"              = "Other…";
+"Reveal in Finder"    = "Reveal in Finder";
+"Open in Terminal"    = "Open in Terminal";
+"Copy Path"           = "Copy Path";
+"Duplicate"           = "Duplicate";
+"Compress"            = "Compress";
+"Extract"             = "Extract";
+"Copy to…"            = "Copy to…";
+"Move to…"            = "Move to…";
+"Rename…"             = "Rename…";
+"Move to Trash"       = "Move to Trash";
+"Actions"             = "Actions";
+
+/* --- Dialogs --- */
+"OK"                  = "OK";
+"Cancel"              = "Cancel";
+"Add"                 = "Add";
+"Save"                = "Save";
+"Create"              = "Create";
+"Edit"                = "Edit";
+"Edit…"               = "Edit…";
+"Remove"              = "Remove";
+"Replace"             = "Replace";
+"Skip"                = "Skip";
+"Keep Both"           = "Keep Both";
+"Cancel All"          = "Cancel All";
+"Merge"               = "Merge";
+"Calculating size…"   = "Calculating size…";
+"Copying…"            = "Copying…";
+"Moving…"             = "Moving…";
+"Cancelling…"         = "Cancelling…";
+"No items selected."  = "No items selected.";
+"Select exactly one item to rename." = "Select exactly one item to rename.";
+"Path"                = "Path";
+"Title"               = "Title";
+"Command"             = "Command";
+"Extension"           = "Extension";
+"Default action (runs on double-click)" = "Default action (runs on double-click)";
+"Apply to all remaining conflicts" = "Apply to all remaining conflicts";
+"Choose App…"         = "Choose App…";
+
+/* --- Preferences --- */
+"Preferences"         = "Preferences";
+"General"             = "General";
+"File operations"     = "File operations";
+"Hide dotfiles by default"            = "Hide dotfiles by default";
+"Restore last-open paths at launch"   = "Restore last-open paths at launch";
+"Open dual-pane at launch"            = "Open dual-pane at launch";
+"Show Button Bank at launch"          = "Show Button Bank at launch";
+"Delete sends items to Trash (recommended)" = "Delete sends items to Trash (recommended)";
+"Reset All Preferences…"              = "Reset All Preferences…";

@@ -9,6 +9,11 @@
 #import <QuickLookThumbnailing/QuickLookThumbnailing.h>
 #import <CoreServices/CoreServices.h>
 #import <objc/runtime.h>
+
+/* Shorthand for NSLocalizedString with nil comment. Keys are the English
+ * source strings; translations live in resources/<lang>.lproj/Localizable.strings
+ * and are bundled into the .app/Contents/Resources/<lang>.lproj at build time. */
+#define L(s) NSLocalizedString((s), nil)
 #include <sys/stat.h>
 #include <pwd.h>
 #include <grp.h>
@@ -738,29 +743,29 @@ typedef NS_ENUM(NSInteger, ListerState) {
     /* Right-click context menu — items route to appDelegate actions */
     NSMenu *menu = [[NSMenu alloc] init];
     menu.delegate = self;    /* rebuild Open With / Actions / Extract dynamically per clicked row */
-    [menu addItemWithTitle:@"Open"           action:@selector(openSelectionAction:) keyEquivalent:@""].target = self;
-    NSMenuItem *actions = [menu addItemWithTitle:@"Actions" action:NULL keyEquivalent:@""];
-    actions.submenu = [[NSMenu alloc] initWithTitle:@"Actions"];
+    [menu addItemWithTitle:L(@"Open")           action:@selector(openSelectionAction:) keyEquivalent:@""].target = self;
+    NSMenuItem *actions = [menu addItemWithTitle:L(@"Actions") action:NULL keyEquivalent:@""];
+    actions.submenu = [[NSMenu alloc] initWithTitle:L(@"Actions")];
     actions.tag = 2;  /* identify in menuNeedsUpdate */
-    NSMenuItem *openWith = [menu addItemWithTitle:@"Open With" action:NULL keyEquivalent:@""];
-    openWith.submenu = [[NSMenu alloc] initWithTitle:@"Open With"];
-    [menu addItemWithTitle:@"Reveal in Finder" action:@selector(revealInFinderAction:) keyEquivalent:@""].target = self;
-    [menu addItemWithTitle:@"Open in Terminal" action:@selector(openInTerminalAction:) keyEquivalent:@""].target = self;
-    [menu addItemWithTitle:@"Copy Path"       action:@selector(copyPathAction:) keyEquivalent:@""].target = self;
+    NSMenuItem *openWith = [menu addItemWithTitle:L(@"Open With") action:NULL keyEquivalent:@""];
+    openWith.submenu = [[NSMenu alloc] initWithTitle:L(@"Open With")];
+    [menu addItemWithTitle:L(@"Reveal in Finder") action:@selector(revealInFinderAction:) keyEquivalent:@""].target = self;
+    [menu addItemWithTitle:L(@"Open in Terminal") action:@selector(openInTerminalAction:) keyEquivalent:@""].target = self;
+    [menu addItemWithTitle:L(@"Copy Path")       action:@selector(copyPathAction:) keyEquivalent:@""].target = self;
     [menu addItem:[NSMenuItem separatorItem]];
-    [menu addItemWithTitle:@"Copy to…"        action:@selector(copyToAction:) keyEquivalent:@""].target = self;
-    [menu addItemWithTitle:@"Move to…"        action:@selector(moveToAction:) keyEquivalent:@""].target = self;
+    [menu addItemWithTitle:L(@"Copy to…")        action:@selector(copyToAction:) keyEquivalent:@""].target = self;
+    [menu addItemWithTitle:L(@"Move to…")        action:@selector(moveToAction:) keyEquivalent:@""].target = self;
     [menu addItem:[NSMenuItem separatorItem]];
-    [menu addItemWithTitle:@"Duplicate"       action:@selector(duplicateAction:) keyEquivalent:@""].target = self;
-    [menu addItemWithTitle:@"Compress"       action:@selector(compressAction:)  keyEquivalent:@""].target = self;
-    NSMenuItem *extract = [menu addItemWithTitle:@"Extract" action:@selector(extractAction:) keyEquivalent:@""];
+    [menu addItemWithTitle:L(@"Duplicate")       action:@selector(duplicateAction:) keyEquivalent:@""].target = self;
+    [menu addItemWithTitle:L(@"Compress")       action:@selector(compressAction:)  keyEquivalent:@""].target = self;
+    NSMenuItem *extract = [menu addItemWithTitle:L(@"Extract") action:@selector(extractAction:) keyEquivalent:@""];
     extract.target = self;
     extract.tag = 1;  /* identify for menuNeedsUpdate */
     [menu addItem:[NSMenuItem separatorItem]];
-    [menu addItemWithTitle:@"Info"           action:@selector(infoAction:)    keyEquivalent:@""].target = _appDelegate;
-    [menu addItemWithTitle:@"Rename…"        action:@selector(renameAction:)  keyEquivalent:@""].target = _appDelegate;
+    [menu addItemWithTitle:L(@"Info")           action:@selector(infoAction:)    keyEquivalent:@""].target = _appDelegate;
+    [menu addItemWithTitle:L(@"Rename…")        action:@selector(renameAction:)  keyEquivalent:@""].target = _appDelegate;
     [menu addItem:[NSMenuItem separatorItem]];
-    [menu addItemWithTitle:@"Move to Trash"  action:@selector(deleteAction:)  keyEquivalent:@""].target = _appDelegate;
+    [menu addItemWithTitle:L(@"Move to Trash")  action:@selector(deleteAction:)  keyEquivalent:@""].target = _appDelegate;
     _tableView.menu = menu;
 
     /* Drag-and-drop — accept file URLs from anywhere (other Listers or Finder) */
@@ -781,19 +786,19 @@ typedef NS_ENUM(NSInteger, ListerState) {
     bank.distribution = NSStackViewDistributionFill;
 
     struct { NSString *title; SEL action; id target; } btns[] = {
-        { @"Copy",    @selector(copyAction:),    _appDelegate },
-        { @"Move",    @selector(moveAction:),    _appDelegate },
-        { @"Delete",  @selector(deleteAction:),  _appDelegate },
-        { @"Rename",  @selector(renameAction:),  _appDelegate },
-        { @"MakeDir", @selector(makeDirAction:), _appDelegate },
-        { @"Info",    @selector(infoAction:),    _appDelegate },
-        { @"Filter",  @selector(filterAction:),  _appDelegate },
-        { @"",        NULL, nil },  /* separator */
-        { @"Parent",  @selector(goUp:),          self },
-        { @"Root",    @selector(goRoot:),        self },
-        { @"",        NULL, nil },
-        { @"All",     @selector(selectAllFiles:),   self },
-        { @"None",    @selector(deselectAllFiles:), self },
+        { L(@"Copy"),    @selector(copyAction:),    _appDelegate },
+        { L(@"Move"),    @selector(moveAction:),    _appDelegate },
+        { L(@"Delete"),  @selector(deleteAction:),  _appDelegate },
+        { L(@"Rename"),  @selector(renameAction:),  _appDelegate },
+        { L(@"MakeDir"), @selector(makeDirAction:), _appDelegate },
+        { L(@"Info"),    @selector(infoAction:),    _appDelegate },
+        { L(@"Filter"),  @selector(filterAction:),  _appDelegate },
+        { @"",           NULL, nil },  /* separator */
+        { L(@"Parent"),  @selector(goUp:),          self },
+        { L(@"Root"),    @selector(goRoot:),        self },
+        { @"",           NULL, nil },
+        { L(@"All"),     @selector(selectAllFiles:),   self },
+        { L(@"None"),    @selector(deselectAllFiles:), self },
     };
     for (size_t i = 0; i < sizeof(btns)/sizeof(btns[0]); i++) {
         if (btns[i].title.length == 0) {
@@ -832,7 +837,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
     [content addSubview:_findField];
 
     /* State label (bottom-left: SOURCE/DEST/OFF — mirrors original status area) */
-    _stateLabel = [NSTextField labelWithString:@"OFF"];
+    _stateLabel = [NSTextField labelWithString:L(@"OFF")];
     _stateLabel.font = [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightBold];
     _stateLabel.alignment = NSTextAlignmentCenter;
     _stateLabel.drawsBackground = YES;
@@ -1639,18 +1644,18 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     NSColor *fg, *bg;
     switch (_state) {
         case ListerStateSource:
-            text = @"SOURCE";
+            text = L(@"SOURCE");
             fg = [NSColor whiteColor];
             bg = [NSColor systemBlueColor];
             break;
         case ListerStateDest:
-            text = @"DEST";
+            text = L(@"DEST");
             fg = [NSColor whiteColor];
             bg = [NSColor systemOrangeColor];
             break;
         case ListerStateOff:
         default:
-            text = @"OFF";
+            text = L(@"OFF");
             fg = [NSColor secondaryLabelColor];
             bg = [NSColor clearColor];
             break;
@@ -1893,13 +1898,13 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
         : @"Choose how to handle this conflict.";
     alert.alertStyle = NSAlertStyleWarning;
 
-    [alert addButtonWithTitle:@"Replace"];
-    [alert addButtonWithTitle:@"Skip"];
-    [alert addButtonWithTitle:@"Keep Both"];
-    [alert addButtonWithTitle:@"Cancel All"];
-    if (bothAreDirs) [alert addButtonWithTitle:@"Merge"];
+    [alert addButtonWithTitle:L(@"Replace")];
+    [alert addButtonWithTitle:L(@"Skip")];
+    [alert addButtonWithTitle:L(@"Keep Both")];
+    [alert addButtonWithTitle:L(@"Cancel All")];
+    if (bothAreDirs) [alert addButtonWithTitle:L(@"Merge")];
 
-    NSButton *applyToAll = [NSButton checkboxWithTitle:@"Apply to all remaining conflicts"
+    NSButton *applyToAll = [NSButton checkboxWithTitle:L(@"Apply to all remaining conflicts")
                                                 target:nil action:nil];
     applyToAll.frame = NSMakeRect(0, 0, 300, 20);
     alert.accessoryView = applyToAll;
@@ -2121,18 +2126,18 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     for (NSView *v in [content.subviews copy]) [v removeFromSuperview];
 
     struct { NSString *title; SEL action; } builtIn[] = {
-        { @"Copy",    @selector(copyAction:)    },
-        { @"Move",    @selector(moveAction:)    },
-        { @"Delete",  @selector(deleteAction:)  },
-        { @"Rename",  @selector(renameAction:)  },
-        { @"MakeDir", @selector(makeDirAction:) },
-        { @"Info",    @selector(infoAction:)    },
-        { @"Filter",  @selector(filterAction:)  },
-        { @"Parent",  @selector(parentAction:)  },
-        { @"Root",    @selector(rootAction:)    },
-        { @"Refresh", @selector(refreshAction:) },
-        { @"All",     @selector(allAction:)     },
-        { @"None",    @selector(noneAction:)    },
+        { L(@"Copy"),    @selector(copyAction:)    },
+        { L(@"Move"),    @selector(moveAction:)    },
+        { L(@"Delete"),  @selector(deleteAction:)  },
+        { L(@"Rename"),  @selector(renameAction:)  },
+        { L(@"MakeDir"), @selector(makeDirAction:) },
+        { L(@"Info"),    @selector(infoAction:)    },
+        { L(@"Filter"),  @selector(filterAction:)  },
+        { L(@"Parent"),  @selector(parentAction:)  },
+        { L(@"Root"),    @selector(rootAction:)    },
+        { L(@"Refresh"), @selector(refreshAction:) },
+        { L(@"All"),     @selector(allAction:)     },
+        { L(@"None"),    @selector(noneAction:)    },
     };
 
     NSStackView *column = [[NSStackView alloc] init];
@@ -2228,7 +2233,7 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
                                                          NSWindowStyleMaskClosable)
                                                 backing:NSBackingStoreBuffered
                                                   defer:NO];
-    w.title = @"Preferences";
+    w.title = L(@"Preferences");
     w.releasedWhenClosed = NO;
 
     self = [super initWithWindow:w];
@@ -2243,28 +2248,28 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     col.translatesAutoresizingMaskIntoConstraints = NO;
     [c addSubview:col];
 
-    NSTextField *header = [NSTextField labelWithString:@"General"];
+    NSTextField *header = [NSTextField labelWithString:L(@"General")];
     header.font = [NSFont boldSystemFontOfSize:13];
     [col addArrangedSubview:header];
 
-    [col addArrangedSubview:[self makeCheckbox:@"Hide dotfiles by default"
+    [col addArrangedSubview:[self makeCheckbox:L(@"Hide dotfiles by default")
                                            key:@"prefHideDotfilesDefault" defaultOn:YES]];
-    [col addArrangedSubview:[self makeCheckbox:@"Restore last-open paths at launch"
+    [col addArrangedSubview:[self makeCheckbox:L(@"Restore last-open paths at launch")
                                            key:@"prefRestoreLastPaths" defaultOn:YES]];
-    [col addArrangedSubview:[self makeCheckbox:@"Open dual-pane at launch"
+    [col addArrangedSubview:[self makeCheckbox:L(@"Open dual-pane at launch")
                                            key:@"prefDualPaneStartup" defaultOn:YES]];
-    [col addArrangedSubview:[self makeCheckbox:@"Show Button Bank at launch"
+    [col addArrangedSubview:[self makeCheckbox:L(@"Show Button Bank at launch")
                                            key:@"prefButtonBankVisible" defaultOn:YES]];
 
-    NSTextField *deleteHeader = [NSTextField labelWithString:@"File operations"];
+    NSTextField *deleteHeader = [NSTextField labelWithString:L(@"File operations")];
     deleteHeader.font = [NSFont boldSystemFontOfSize:13];
     [col addArrangedSubview:deleteHeader];
 
-    [col addArrangedSubview:[self makeCheckbox:@"Delete sends items to Trash (recommended)"
+    [col addArrangedSubview:[self makeCheckbox:L(@"Delete sends items to Trash (recommended)")
                                            key:@"prefDeleteToTrash" defaultOn:YES]];
 
     /* Footer: Reset button */
-    NSButton *reset = [NSButton buttonWithTitle:@"Reset All Preferences…"
+    NSButton *reset = [NSButton buttonWithTitle:L(@"Reset All Preferences…")
                                          target:self
                                          action:@selector(resetAction:)];
     reset.bezelStyle = NSBezelStyleRounded;
@@ -2405,112 +2410,110 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     /* App menu */
     NSMenuItem *appItem = [[NSMenuItem alloc] init];
     NSMenu *appMenu = [[NSMenu alloc] initWithTitle:@"iDOpus"];
-    [appMenu addItemWithTitle:@"About iDOpus" action:@selector(orderFrontStandardAboutPanel:) keyEquivalent:@""];
+    [appMenu addItemWithTitle:L(@"About iDOpus") action:@selector(orderFrontStandardAboutPanel:) keyEquivalent:@""];
     [appMenu addItem:[NSMenuItem separatorItem]];
-    NSMenuItem *prefsItem = [appMenu addItemWithTitle:@"Preferences…"
+    NSMenuItem *prefsItem = [appMenu addItemWithTitle:L(@"Preferences…")
                                                action:@selector(showPreferencesAction:)
                                         keyEquivalent:@","];
     prefsItem.target = self;
     [appMenu addItem:[NSMenuItem separatorItem]];
-    [appMenu addItemWithTitle:@"Quit iDOpus" action:@selector(terminate:) keyEquivalent:@"q"];
+    [appMenu addItemWithTitle:L(@"Quit iDOpus") action:@selector(terminate:) keyEquivalent:@"q"];
     appItem.submenu = appMenu;
     [mainMenu addItem:appItem];
 
     /* File menu */
     NSMenuItem *fileItem = [[NSMenuItem alloc] init];
-    NSMenu *fileMenu = [[NSMenu alloc] initWithTitle:@"File"];
-    [fileMenu addItemWithTitle:@"New Lister" action:@selector(newListerAction:) keyEquivalent:@"n"];
-    NSMenuItem *newFileMenu = [fileMenu addItemWithTitle:@"New File…"
+    NSMenu *fileMenu = [[NSMenu alloc] initWithTitle:L(@"File")];
+    [fileMenu addItemWithTitle:L(@"New Lister") action:@selector(newListerAction:) keyEquivalent:@"n"];
+    NSMenuItem *newFileMenu = [fileMenu addItemWithTitle:L(@"New File…")
                                                   action:@selector(newFileAction:)
                                            keyEquivalent:@"n"];
     newFileMenu.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagOption;
-    [fileMenu addItemWithTitle:@"New Tab"
+    [fileMenu addItemWithTitle:L(@"New Tab")
                         action:@selector(newTabAction:)
                  keyEquivalent:@"t"];
-    NSMenuItem *splitItem = [fileMenu addItemWithTitle:@"Split Display"
+    NSMenuItem *splitItem = [fileMenu addItemWithTitle:L(@"Split Display")
                                                 action:@selector(splitDisplayAction:)
                                          keyEquivalent:@"N"];
     splitItem.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
     [fileMenu addItem:[NSMenuItem separatorItem]];
-    [fileMenu addItemWithTitle:@"Back"    action:@selector(goBack:)    keyEquivalent:@"["];
-    [fileMenu addItemWithTitle:@"Forward" action:@selector(goForward:) keyEquivalent:@"]"];
+    [fileMenu addItemWithTitle:L(@"Back")    action:@selector(goBack:)    keyEquivalent:@"["];
+    [fileMenu addItemWithTitle:L(@"Forward") action:@selector(goForward:) keyEquivalent:@"]"];
     [fileMenu addItem:[NSMenuItem separatorItem]];
-    [fileMenu addItemWithTitle:@"Find"      action:@selector(performFindPanelAction:) keyEquivalent:@"f"];
-    NSMenuItem *gotoItem = [fileMenu addItemWithTitle:@"Go to Path…"
+    [fileMenu addItemWithTitle:L(@"Find")      action:@selector(performFindPanelAction:) keyEquivalent:@"f"];
+    NSMenuItem *gotoItem = [fileMenu addItemWithTitle:L(@"Go to Path…")
                                                action:@selector(goToPathAction:)
                                         keyEquivalent:@"l"];
     gotoItem.target = self;
     [fileMenu addItem:[NSMenuItem separatorItem]];
-    [fileMenu addItemWithTitle:@"Close" action:@selector(performClose:) keyEquivalent:@"w"];
+    [fileMenu addItemWithTitle:L(@"Close") action:@selector(performClose:) keyEquivalent:@"w"];
     fileItem.submenu = fileMenu;
     [mainMenu addItem:fileItem];
 
     /* Functions menu — matches DOpus F-key bindings */
     NSMenuItem *funcItem = [[NSMenuItem alloc] init];
-    NSMenu *funcMenu = [[NSMenu alloc] initWithTitle:@"Functions"];
-    [self addFunctionItem:funcMenu title:@"Rename"  action:@selector(renameAction:)  fkey:NSF3FunctionKey];
-    [self addFunctionItem:funcMenu title:@"Copy"    action:@selector(copyAction:)    fkey:NSF5FunctionKey];
-    [self addFunctionItem:funcMenu title:@"Move"    action:@selector(moveAction:)    fkey:NSF6FunctionKey];
-    [self addFunctionItem:funcMenu title:@"MakeDir" action:@selector(makeDirAction:) fkey:NSF7FunctionKey];
-    [self addFunctionItem:funcMenu title:@"Delete"  action:@selector(deleteAction:)  fkey:NSF8FunctionKey];
-    [self addFunctionItem:funcMenu title:@"Info"    action:@selector(infoAction:)    fkey:NSF9FunctionKey];
+    NSMenu *funcMenu = [[NSMenu alloc] initWithTitle:L(@"Functions")];
+    [self addFunctionItem:funcMenu title:L(@"Rename")  action:@selector(renameAction:)  fkey:NSF3FunctionKey];
+    [self addFunctionItem:funcMenu title:L(@"Copy")    action:@selector(copyAction:)    fkey:NSF5FunctionKey];
+    [self addFunctionItem:funcMenu title:L(@"Move")    action:@selector(moveAction:)    fkey:NSF6FunctionKey];
+    [self addFunctionItem:funcMenu title:L(@"MakeDir") action:@selector(makeDirAction:) fkey:NSF7FunctionKey];
+    [self addFunctionItem:funcMenu title:L(@"Delete")  action:@selector(deleteAction:)  fkey:NSF8FunctionKey];
+    [self addFunctionItem:funcMenu title:L(@"Info")    action:@selector(infoAction:)    fkey:NSF9FunctionKey];
     [funcMenu addItem:[NSMenuItem separatorItem]];
-    NSMenuItem *filterItem = [funcMenu addItemWithTitle:@"Filter…"
+    NSMenuItem *filterItem = [funcMenu addItemWithTitle:L(@"Filter…")
                                                  action:@selector(filterAction:)
                                           keyEquivalent:@"f"];
     filterItem.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
 
-    NSMenuItem *selectItem = [funcMenu addItemWithTitle:@"Select By Pattern…"
+    NSMenuItem *selectItem = [funcMenu addItemWithTitle:L(@"Select By Pattern…")
                                                  action:@selector(selectPatternAction:)
                                           keyEquivalent:@"a"];
     selectItem.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
-    [funcMenu addItemWithTitle:@"Compare With Destination"
+    [funcMenu addItemWithTitle:L(@"Compare With Destination")
                         action:@selector(compareSourceWithDestAction:)
                  keyEquivalent:@""];
     [funcMenu addItem:[NSMenuItem separatorItem]];
-    [funcMenu addItemWithTitle:@"Add Custom Button…"    action:@selector(addCustomButtonAction:)    keyEquivalent:@""];
-    [funcMenu addItemWithTitle:@"Edit Custom Button…"   action:@selector(editCustomButtonAction:)   keyEquivalent:@""];
-    [funcMenu addItemWithTitle:@"Remove Custom Button…" action:@selector(removeCustomButtonAction:) keyEquivalent:@""];
+    [funcMenu addItemWithTitle:L(@"Add Custom Button…")    action:@selector(addCustomButtonAction:)    keyEquivalent:@""];
+    [funcMenu addItemWithTitle:L(@"Edit Custom Button…")   action:@selector(editCustomButtonAction:)   keyEquivalent:@""];
+    [funcMenu addItemWithTitle:L(@"Remove Custom Button…") action:@selector(removeCustomButtonAction:) keyEquivalent:@""];
     [funcMenu addItem:[NSMenuItem separatorItem]];
-    [funcMenu addItemWithTitle:@"Add File Type Action…"    action:@selector(addFileTypeActionAction:)    keyEquivalent:@""];
-    [funcMenu addItemWithTitle:@"Remove File Type Action…" action:@selector(manageFileTypeActionsAction:) keyEquivalent:@""];
+    [funcMenu addItemWithTitle:L(@"Add File Type Action…")    action:@selector(addFileTypeActionAction:)    keyEquivalent:@""];
+    [funcMenu addItemWithTitle:L(@"Remove File Type Action…") action:@selector(manageFileTypeActionsAction:) keyEquivalent:@""];
     funcItem.submenu = funcMenu;
     [mainMenu addItem:funcItem];
 
     /* Bookmarks menu */
     NSMenuItem *bmItem = [[NSMenuItem alloc] init];
-    NSMenu *bmMenu = [[NSMenu alloc] initWithTitle:@"Bookmarks"];
+    NSMenu *bmMenu = [[NSMenu alloc] initWithTitle:L(@"Bookmarks")];
     bmMenu.autoenablesItems = NO;
     bmMenu.delegate = self;     /* rebuild on open */
     bmItem.submenu = bmMenu;
     [mainMenu addItem:bmItem];
 
-    /* Window menu — AppKit auto-populates Minimize, Zoom, Bring All to Front,
-     * Show Next/Previous Tab (⌃Tab / ⌃⇧Tab), Move Tab to New Window, etc.
-     * once we register the menu via setWindowsMenu:. */
+    /* Window menu */
     NSMenuItem *windowItem = [[NSMenuItem alloc] init];
-    NSMenu *windowMenu = [[NSMenu alloc] initWithTitle:@"Window"];
-    [windowMenu addItemWithTitle:@"Minimize" action:@selector(performMiniaturize:) keyEquivalent:@"m"];
-    [windowMenu addItemWithTitle:@"Zoom" action:@selector(performZoom:) keyEquivalent:@""];
+    NSMenu *windowMenu = [[NSMenu alloc] initWithTitle:L(@"Window")];
+    [windowMenu addItemWithTitle:L(@"Minimize") action:@selector(performMiniaturize:) keyEquivalent:@"m"];
+    [windowMenu addItemWithTitle:L(@"Zoom") action:@selector(performZoom:) keyEquivalent:@""];
     [windowMenu addItem:[NSMenuItem separatorItem]];
-    [windowMenu addItemWithTitle:@"Bring All to Front" action:@selector(arrangeInFront:) keyEquivalent:@""];
+    [windowMenu addItemWithTitle:L(@"Bring All to Front") action:@selector(arrangeInFront:) keyEquivalent:@""];
     windowItem.submenu = windowMenu;
     [mainMenu addItem:windowItem];
     [NSApp setWindowsMenu:windowMenu];
 
     /* View menu */
     NSMenuItem *viewItem = [[NSMenuItem alloc] init];
-    NSMenu *viewMenu = [[NSMenu alloc] initWithTitle:@"View"];
-    [viewMenu addItemWithTitle:@"Show Hidden Files" action:@selector(toggleHidden:) keyEquivalent:@"."];
+    NSMenu *viewMenu = [[NSMenu alloc] initWithTitle:L(@"View")];
+    [viewMenu addItemWithTitle:L(@"Show Hidden Files") action:@selector(toggleHidden:) keyEquivalent:@"."];
 
     /* Sort By submenu */
-    NSMenuItem *sortItem = [viewMenu addItemWithTitle:@"Sort By" action:NULL keyEquivalent:@""];
-    NSMenu *sortSub = [[NSMenu alloc] initWithTitle:@"Sort By"];
+    NSMenuItem *sortItem = [viewMenu addItemWithTitle:L(@"Sort By") action:NULL keyEquivalent:@""];
+    NSMenu *sortSub = [[NSMenu alloc] initWithTitle:L(@"Sort By")];
     struct { NSString *title; int field; } sorts[] = {
-        { @"Name",      SORT_NAME      },
-        { @"Size",      SORT_SIZE      },
-        { @"Date",      SORT_DATE      },
-        { @"Type",      SORT_EXTENSION },
+        { L(@"Name"),      SORT_NAME      },
+        { L(@"Size"),      SORT_SIZE      },
+        { L(@"Date"),      SORT_DATE      },
+        { L(@"Type"),      SORT_EXTENSION },
     };
     for (size_t i = 0; i < sizeof(sorts)/sizeof(sorts[0]); i++) {
         NSMenuItem *mi = [sortSub addItemWithTitle:sorts[i].title
@@ -2519,16 +2522,16 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
         mi.tag = sorts[i].field;
     }
     [sortSub addItem:[NSMenuItem separatorItem]];
-    [sortSub addItemWithTitle:@"Reverse"      action:@selector(toggleReverseSortAction:) keyEquivalent:@""];
-    [sortSub addItemWithTitle:@"Files Mixed"  action:@selector(toggleFilesMixedAction:) keyEquivalent:@""];
+    [sortSub addItemWithTitle:L(@"Reverse")      action:@selector(toggleReverseSortAction:) keyEquivalent:@""];
+    [sortSub addItemWithTitle:L(@"Files Mixed")  action:@selector(toggleFilesMixedAction:) keyEquivalent:@""];
     sortItem.submenu = sortSub;
 
-    /* Show Columns submenu (hide/show columns) — applies to all Listers */
-    NSMenuItem *colsItem = [viewMenu addItemWithTitle:@"Show Columns" action:NULL keyEquivalent:@""];
-    NSMenu *colsSub = [[NSMenu alloc] initWithTitle:@"Show Columns"];
+    /* Show Columns submenu */
+    NSMenuItem *colsItem = [viewMenu addItemWithTitle:L(@"Show Columns") action:NULL keyEquivalent:@""];
+    NSMenu *colsSub = [[NSMenu alloc] initWithTitle:L(@"Show Columns")];
     colsSub.autoenablesItems = NO;
     NSArray<NSString *> *colIds = @[@"name", @"size", @"date", @"type"];
-    NSArray<NSString *> *colTitles = @[@"Name", @"Size", @"Date", @"Type"];
+    NSArray<NSString *> *colTitles = @[L(@"Name"), L(@"Size"), L(@"Date"), L(@"Type")];
     NSSet<NSString *> *hidden = [NSSet setWithArray:
         ([[NSUserDefaults standardUserDefaults] arrayForKey:@"hiddenColumns"] ?: @[])];
     for (NSUInteger i = 0; i < colIds.count; i++) {
@@ -2537,18 +2540,17 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
                                      keyEquivalent:@""];
         mi.representedObject = colIds[i];
         mi.state = [hidden containsObject:colIds[i]] ? NSControlStateValueOff : NSControlStateValueOn;
-        /* Name column should not be hide-able */
         if ([colIds[i] isEqualToString:@"name"]) mi.enabled = NO;
     }
     colsItem.submenu = colsSub;
 
     [viewMenu addItem:[NSMenuItem separatorItem]];
-    NSMenuItem *qlItem = [viewMenu addItemWithTitle:@"Quick Look"
+    NSMenuItem *qlItem = [viewMenu addItemWithTitle:L(@"Quick Look")
                                              action:@selector(toggleQuickLook:)
                                       keyEquivalent:@" "];
-    qlItem.keyEquivalentModifierMask = 0;  /* bare Space */
+    qlItem.keyEquivalentModifierMask = 0;
     [viewMenu addItem:[NSMenuItem separatorItem]];
-    [viewMenu addItemWithTitle:@"Show/Hide Buttons" action:@selector(toggleButtonBank:) keyEquivalent:@"b"];
+    [viewMenu addItemWithTitle:L(@"Show/Hide Buttons") action:@selector(toggleButtonBank:) keyEquivalent:@"b"];
     viewItem.submenu = viewMenu;
     [mainMenu addItem:viewItem];
 
@@ -2702,10 +2704,10 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
                                     @(NSDownloadsDirectory), @(NSApplicationDirectory),
                                     @(NSPicturesDirectory), @(NSMoviesDirectory),
                                     @(NSMusicDirectory) ];
-    NSArray<NSString *> *names = @[ @"Desktop", @"Documents", @"Downloads",
-                                     @"Applications", @"Pictures", @"Movies", @"Music" ];
+    NSArray<NSString *> *names = @[ L(@"Desktop"), L(@"Documents"), L(@"Downloads"),
+                                     L(@"Applications"), L(@"Pictures"), L(@"Movies"), L(@"Music") ];
     NSMutableArray<NSDictionary *> *out = [NSMutableArray array];
-    [out addObject:@{ @"name": @"Home", @"path": NSHomeDirectory() }];
+    [out addObject:@{ @"name": L(@"Home"), @"path": NSHomeDirectory() }];
     for (NSUInteger i = 0; i < dirs.count; i++) {
         NSArray<NSURL *> *u = [fm URLsForDirectory:dirs[i].unsignedIntegerValue
                                          inDomains:NSUserDomainMask];
@@ -2762,7 +2764,7 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     }
     if (userVols.count > 0) {
         [menu addItem:[NSMenuItem separatorItem]];
-        NSMenuItem *header = [[NSMenuItem alloc] initWithTitle:@"Devices" action:NULL keyEquivalent:@""];
+        NSMenuItem *header = [[NSMenuItem alloc] initWithTitle:L(@"Devices") action:NULL keyEquivalent:@""];
         header.enabled = NO;
         [menu addItem:header];
         for (NSURL *u in userVols) {
@@ -2782,13 +2784,13 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     }
 
     [menu addItem:[NSMenuItem separatorItem]];
-    NSMenuItem *add = [menu addItemWithTitle:@"Add Current…"
+    NSMenuItem *add = [menu addItemWithTitle:L(@"Add Current…")
                                       action:@selector(addCurrentBookmark:)
                                keyEquivalent:@"d"];
     add.target = self;
 
     if (userBm.count > 0) {
-        NSMenuItem *rm = [menu addItemWithTitle:@"Remove Bookmark…"
+        NSMenuItem *rm = [menu addItemWithTitle:L(@"Remove Bookmark…")
                                          action:@selector(removeBookmark:)
                                   keyEquivalent:@""];
         rm.target = self;
