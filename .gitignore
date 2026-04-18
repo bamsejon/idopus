@@ -17,3 +17,8 @@ xcuserdata/
 # IDE
 .vscode/
 .idea/
+
+# Third-party binaries fetched by scripts/fetch-rclone.sh
+third_party/rclone/rclone
+third_party/rclone/LICENSE
+third_party/rclone/VERSION

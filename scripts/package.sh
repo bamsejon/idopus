@@ -24,6 +24,9 @@ DMG_NAME="iDOpus-${VERSION}.dmg"
 DMG_PATH="$DIST_DIR/$DMG_NAME"
 VOL_NAME="iDOpus ${VERSION}"
 
+echo "=== Fetching rclone helper (if needed) ==="
+"$SCRIPT_DIR/fetch-rclone.sh"
+
 echo "=== Building iDOpus ${VERSION} (Release) ==="
 rm -rf "$BUILD_DIR"
 mkdir -p "$BUILD_DIR" "$DIST_DIR"

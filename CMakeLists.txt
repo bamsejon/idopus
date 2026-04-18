@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(idopus VERSION 1.5.1 LANGUAGES C)
+project(idopus VERSION 1.6.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -70,4 +70,30 @@ if(APPLE)
         MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
         MACOSX_BUNDLE_COPYRIGHT "Copyright 2026 Jon Bylund. Original (c) GP Software / Jonathan Potter."
     )
+
+    # Bundle rclone helper binary if it's been fetched into third_party/rclone/.
+    # scripts/fetch-rclone.sh downloads and pins the official build.
+    set(RCLONE_BIN "${CMAKE_SOURCE_DIR}/third_party/rclone/rclone")
+    set(RCLONE_LIC "${CMAKE_SOURCE_DIR}/third_party/rclone/LICENSE")
+    if(EXISTS "${RCLONE_BIN}")
+        add_custom_command(TARGET idopus POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory
+                "$<TARGET_BUNDLE_DIR:idopus>/Contents/MacOS"
+            COMMAND ${CMAKE_COMMAND} -E copy
+                "${RCLONE_BIN}"
+                "$<TARGET_BUNDLE_DIR:idopus>/Contents/MacOS/rclone"
+            COMMAND chmod +x "$<TARGET_BUNDLE_DIR:idopus>/Contents/MacOS/rclone"
+            COMMENT "Bundling rclone helper")
+        if(EXISTS "${RCLONE_LIC}")
+            add_custom_command(TARGET idopus POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E make_directory
+                    "$<TARGET_BUNDLE_DIR:idopus>/Contents/Resources"
+                COMMAND ${CMAKE_COMMAND} -E copy
+                    "${RCLONE_LIC}"
+                    "$<TARGET_BUNDLE_DIR:idopus>/Contents/Resources/rclone-LICENSE.txt"
+                COMMENT "Bundling rclone LICENSE")
+        endif()
+    else()
+        message(STATUS "rclone binary not found at ${RCLONE_BIN} — run scripts/fetch-rclone.sh to bundle it")
+    endif()
 endif()

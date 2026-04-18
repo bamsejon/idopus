@@ -33,6 +33,23 @@ typedef NS_ENUM(NSInteger, ListerState) {
 @class ListerWindowController;
 @class ButtonBankPanelController;
 @class PreferencesWindowController;
+@class IDOpusAppDelegate;
+
+/* Forward-declared remote UI classes — full implementations near the bottom
+ * of the file. The @interface is declared here (not @class) so the AppDelegate
+ * can read the `.window` property from NSWindowController. */
+@interface ConnectDialogController : NSWindowController
+@property (nonatomic, copy) void (^onConnect)(NSString *displayName,
+                                               NSString *rcloneSpec,
+                                               NSString *startPath);
+@end
+
+@interface RemoteBrowserWindowController : NSWindowController <NSTableViewDataSource, NSTableViewDelegate>
+- (instancetype)initWithDisplayName:(NSString *)name
+                           spec:(NSString *)spec
+                           path:(NSString *)path
+                    appDelegate:(IDOpusAppDelegate *)app;
+@end
 
 /* --- App Delegate --- */
 
@@ -43,6 +60,8 @@ typedef NS_ENUM(NSInteger, ListerState) {
 @property (nonatomic, weak) ListerWindowController *activeDest;
 @property (nonatomic, strong) ButtonBankPanelController *buttonBankPanel;
 @property (nonatomic, strong) PreferencesWindowController *preferencesWindow;
+@property (nonatomic, strong) NSMutableArray *remoteBrowsers;   /* active RemoteBrowser controllers */
+@property (nonatomic, strong) ConnectDialogController *connectDialog;
 
 - (void)refreshAllListersShowing:(NSString *)path;
 - (void)showAlert:(NSString *)title info:(NSString *)info style:(NSAlertStyle)style;
@@ -3098,6 +3117,11 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
                                         keyEquivalent:@"l"];
     gotoItem.target = self;
     [fileMenu addItem:[NSMenuItem separatorItem]];
+    NSMenuItem *connectItem = [fileMenu addItemWithTitle:L(@"Connect to Server…")
+                                                   action:@selector(connectToServerAction:)
+                                            keyEquivalent:@"k"];
+    connectItem.target = self;
+    [fileMenu addItem:[NSMenuItem separatorItem]];
     [fileMenu addItemWithTitle:L(@"Close") action:@selector(performClose:) keyEquivalent:@"w"];
     fileItem.submenu = fileMenu;
     [mainMenu addItem:fileItem];
@@ -5234,6 +5258,594 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
         }
         [stack addObjectsFromArray:v.subviews];
     }
+}
+
+- (void)connectToServerAction:(id)sender {
+    if (!_remoteBrowsers) _remoteBrowsers = [NSMutableArray array];
+    _connectDialog = [[ConnectDialogController alloc] init];
+    __weak typeof(self) weakSelf = self;
+    _connectDialog.onConnect = ^(NSString *name, NSString *spec, NSString *path) {
+        typeof(self) s = weakSelf; if (!s) return;
+        RemoteBrowserWindowController *browser = [[RemoteBrowserWindowController alloc]
+            initWithDisplayName:name spec:spec path:path appDelegate:s];
+        [s.remoteBrowsers addObject:browser];
+        [browser.window center];
+        [browser.window makeKeyAndOrderFront:nil];
+    };
+    NSWindow *parent = [NSApp keyWindow] ?: _activeSource.window;
+    if (parent) {
+        [parent beginSheet:_connectDialog.window completionHandler:^(NSModalResponse r) { (void)r; }];
+    } else {
+        [_connectDialog.window center];
+        [_connectDialog.window makeKeyAndOrderFront:nil];
+    }
+}
+
+@end
+
+#pragma mark - Rclone wrapper
+
+/* Thin wrapper around the bundled rclone binary. Public entry points run
+ * rclone as a detached NSTask and deliver results on the main queue. Only
+ * covers the operations v1.6 needs: list (lsjson) and copy-to-local.
+ * Additional verbs (copyto, moveto, delete, mkdir) land in later releases.
+ *
+ * Remotes are expressed as *inline* rclone specs so we don't have to persist
+ * credentials to rclone.conf. Example for SFTP:
+ *   :sftp,host=192.168.4.10,user=jon,pass=<obscured>:/path
+ * The password must be passed through `rclone obscure` first — rclone won't
+ * accept a clear-text pass in the inline spec. */
+@interface IDOpusRclone : NSObject
++ (NSString *)binaryPath;
++ (void)obscurePassword:(NSString *)plaintext
+             completion:(void (^)(NSString *obscured, NSError *err))completion;
++ (void)listRemote:(NSString *)remoteSpec
+              path:(NSString *)remotePath
+        completion:(void (^)(NSArray<NSDictionary *> *entries, NSError *err))completion;
++ (NSTask *)copyFromRemote:(NSString *)remoteSpec
+                remotePath:(NSString *)remotePath
+                   toLocal:(NSString *)localDir
+                  progress:(void (^)(NSString *line))progress
+                completion:(void (^)(int status))completion;
+@end
+
+@implementation IDOpusRclone
+
++ (NSString *)binaryPath {
+    NSString *p = [[NSBundle mainBundle] pathForAuxiliaryExecutable:@"rclone"];
+    if (p && [[NSFileManager defaultManager] isExecutableFileAtPath:p]) return p;
+    /* Fallback to Contents/MacOS/rclone — auxiliaryExecutable looks there but
+     * early in development it might not be registered yet. */
+    NSString *alt = [[[NSBundle mainBundle] bundlePath]
+        stringByAppendingPathComponent:@"Contents/MacOS/rclone"];
+    if ([[NSFileManager defaultManager] isExecutableFileAtPath:alt]) return alt;
+    /* Dev convenience: repo checkout */
+    NSString *dev = [@"~/claude/idopus/third_party/rclone/rclone" stringByExpandingTildeInPath];
+    if ([[NSFileManager defaultManager] isExecutableFileAtPath:dev]) return dev;
+    return nil;
+}
+
++ (NSTask *)_taskWithArgs:(NSArray<NSString *> *)args {
+    NSString *bin = [self binaryPath];
+    if (!bin) return nil;
+    NSTask *t = [[NSTask alloc] init];
+    t.executableURL = [NSURL fileURLWithPath:bin];
+    t.arguments = args;
+    return t;
+}
+
++ (void)obscurePassword:(NSString *)plaintext
+             completion:(void (^)(NSString *obscured, NSError *err))completion {
+    NSTask *t = [self _taskWithArgs:@[@"obscure", plaintext]];
+    if (!t) { completion(nil, [NSError errorWithDomain:@"iDOpus" code:1
+        userInfo:@{NSLocalizedDescriptionKey:@"rclone binary not found"}]); return; }
+    NSPipe *out = [NSPipe pipe];
+    t.standardOutput = out;
+    t.standardError = [NSPipe pipe];
+    t.terminationHandler = ^(NSTask *task) {
+        NSData *d = [out.fileHandleForReading readDataToEndOfFile];
+        NSString *s = [[[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding]
+            stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (task.terminationStatus == 0 && s.length) completion(s, nil);
+            else completion(nil, [NSError errorWithDomain:@"iDOpus" code:2
+                userInfo:@{NSLocalizedDescriptionKey:@"rclone obscure failed"}]);
+        });
+    };
+    NSError *err = nil;
+    if (![t launchAndReturnError:&err]) completion(nil, err);
+}
+
++ (void)listRemote:(NSString *)remoteSpec
+              path:(NSString *)remotePath
+        completion:(void (^)(NSArray<NSDictionary *> *entries, NSError *err))completion {
+    if (!remotePath.length) remotePath = @"/";
+    NSString *target = [NSString stringWithFormat:@"%@%@", remoteSpec, remotePath];
+    NSTask *t = [self _taskWithArgs:@[@"lsjson", target, @"--no-modtime=false"]];
+    if (!t) { completion(nil, [NSError errorWithDomain:@"iDOpus" code:1
+        userInfo:@{NSLocalizedDescriptionKey:@"rclone binary not found"}]); return; }
+    NSPipe *out = [NSPipe pipe];
+    NSPipe *err = [NSPipe pipe];
+    t.standardOutput = out;
+    t.standardError = err;
+    t.terminationHandler = ^(NSTask *task) {
+        NSData *d = [out.fileHandleForReading readDataToEndOfFile];
+        NSData *e = [err.fileHandleForReading readDataToEndOfFile];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (task.terminationStatus != 0) {
+                NSString *msg = [[NSString alloc] initWithData:e encoding:NSUTF8StringEncoding];
+                completion(nil, [NSError errorWithDomain:@"iDOpus" code:3
+                    userInfo:@{NSLocalizedDescriptionKey:msg.length ? msg : @"rclone lsjson failed"}]);
+                return;
+            }
+            NSError *jerr = nil;
+            id parsed = [NSJSONSerialization JSONObjectWithData:d options:0 error:&jerr];
+            if ([parsed isKindOfClass:[NSArray class]]) completion(parsed, nil);
+            else completion(@[], jerr);
+        });
+    };
+    NSError *launchErr = nil;
+    if (![t launchAndReturnError:&launchErr]) completion(nil, launchErr);
+}
+
++ (NSTask *)copyFromRemote:(NSString *)remoteSpec
+                remotePath:(NSString *)remotePath
+                   toLocal:(NSString *)localDir
+                  progress:(void (^)(NSString *line))progress
+                completion:(void (^)(int status))completion {
+    NSString *src = [NSString stringWithFormat:@"%@%@", remoteSpec, remotePath];
+    NSArray<NSString *> *args = @[@"copy", src, localDir,
+                                   @"--progress", @"--stats=1s",
+                                   @"--transfers=4"];
+    NSTask *t = [self _taskWithArgs:args];
+    if (!t) { completion(-1); return nil; }
+    NSPipe *out = [NSPipe pipe];
+    NSPipe *err = [NSPipe pipe];
+    t.standardOutput = out;
+    t.standardError = err;
+    __block NSMutableString *buf = [NSMutableString string];
+    void (^drain)(NSFileHandle *) = ^(NSFileHandle *fh) {
+        NSData *d = fh.availableData;
+        if (!d.length) { fh.readabilityHandler = nil; return; }
+        NSString *s = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+        if (!s.length) return;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [buf appendString:s];
+            while (YES) {
+                NSRange r = [buf rangeOfString:@"\n"];
+                if (r.location == NSNotFound) break;
+                NSString *line = [buf substringToIndex:r.location];
+                [buf deleteCharactersInRange:NSMakeRange(0, r.location + 1)];
+                if (progress && line.length) progress(line);
+            }
+        });
+    };
+    out.fileHandleForReading.readabilityHandler = drain;
+    err.fileHandleForReading.readabilityHandler = drain;
+    t.terminationHandler = ^(NSTask *task) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            completion(task.terminationStatus);
+        });
+    };
+    NSError *launchErr = nil;
+    if (![t launchAndReturnError:&launchErr]) { completion(-1); return nil; }
+    return t;
+}
+
+@end
+
+#pragma mark - Connect dialog
+
+/* Small panel that collects a SFTP connection (protocol picker reserved for
+ * future releases — v1.6 ships SFTP only). Returns an inline rclone spec and
+ * a starting path on OK. Password is obscured via rclone before being embedded
+ * in the spec so it's not trivially readable by anyone seeing the command line. */
+@implementation ConnectDialogController {
+    NSTextField *_hostField;
+    NSTextField *_portField;
+    NSTextField *_userField;
+    NSSecureTextField *_passField;
+    NSTextField *_pathField;
+    NSTextField *_statusLabel;
+    NSButton *_connectBtn;
+}
+
+- (instancetype)init {
+    NSRect frame = NSMakeRect(0, 0, 520, 360);
+    NSPanel *panel = [[NSPanel alloc] initWithContentRect:frame
+        styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable)
+        backing:NSBackingStoreBuffered defer:NO];
+    panel.title = L(@"Connect to Server");
+    self = [super initWithWindow:panel];
+    if (!self) return nil;
+
+    NSView *c = panel.contentView;
+
+    NSTextField *hdr = [NSTextField labelWithString:L(@"Connect to Server")];
+    hdr.font = [NSFont boldSystemFontOfSize:14];
+    hdr.frame = NSMakeRect(20, 326, 480, 22);
+    [c addSubview:hdr];
+
+    NSTextField *sub = [NSTextField wrappingLabelWithString:
+        L(@"Currently supports SFTP (SSH file transfer). Uses the bundled rclone helper — no external install needed. SMB and cloud storage arrive in v1.7.")];
+    sub.textColor = [NSColor secondaryLabelColor];
+    sub.font = [NSFont systemFontOfSize:11];
+    sub.frame = NSMakeRect(20, 280, 480, 40);
+    [c addSubview:sub];
+
+    CGFloat y = 240;
+    NSArray<NSString *> *labels = @[L(@"Host:"), L(@"Port:"), L(@"User:"), L(@"Password:"), L(@"Remote path:")];
+    NSMutableArray<NSTextField *> *fields = [NSMutableArray array];
+    for (NSUInteger i = 0; i < labels.count; i++) {
+        NSTextField *lbl = [NSTextField labelWithString:labels[i]];
+        lbl.alignment = NSTextAlignmentRight;
+        lbl.frame = NSMakeRect(20, y, 100, 22);
+        [c addSubview:lbl];
+        NSTextField *tf = (i == 3)
+            ? (NSTextField *)[[NSSecureTextField alloc] initWithFrame:NSMakeRect(128, y - 2, 372, 24)]
+            : [[NSTextField alloc] initWithFrame:NSMakeRect(128, y - 2, 372, 24)];
+        [c addSubview:tf];
+        [fields addObject:tf];
+        y -= 32;
+    }
+    _hostField = fields[0]; _hostField.placeholderString = @"e.g. fileserver.local";
+    _portField = fields[1]; _portField.placeholderString = @"22 (default)";
+    _userField = fields[2]; _userField.placeholderString = NSUserName();
+    _passField = (NSSecureTextField *)fields[3];
+    _pathField = fields[4]; _pathField.placeholderString = @"/ (root)";
+
+    _statusLabel = [NSTextField labelWithString:@""];
+    _statusLabel.textColor = [NSColor secondaryLabelColor];
+    _statusLabel.font = [NSFont systemFontOfSize:11];
+    _statusLabel.frame = NSMakeRect(20, 56, 360, 20);
+    _statusLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    [c addSubview:_statusLabel];
+
+    NSButton *cancel = [NSButton buttonWithTitle:L(@"Cancel") target:self action:@selector(cancel:)];
+    cancel.keyEquivalent = @"\033";
+    cancel.bezelStyle = NSBezelStyleRounded;
+    cancel.frame = NSMakeRect(300, 16, 100, 32);
+    [c addSubview:cancel];
+
+    _connectBtn = [NSButton buttonWithTitle:L(@"Connect") target:self action:@selector(connect:)];
+    _connectBtn.keyEquivalent = @"\r";
+    _connectBtn.bezelStyle = NSBezelStyleRounded;
+    _connectBtn.frame = NSMakeRect(408, 16, 100, 32);
+    [c addSubview:_connectBtn];
+
+    panel.initialFirstResponder = _hostField;
+    return self;
+}
+
+- (void)cancel:(id)sender {
+    [self.window.sheetParent endSheet:self.window returnCode:NSModalResponseCancel];
+    [self.window close];
+}
+
+- (void)connect:(id)sender {
+    NSString *host = [_hostField.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    if (!host.length) { _statusLabel.stringValue = L(@"Host is required."); return; }
+    NSString *port = [_portField.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    NSString *user = [_userField.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    if (!user.length) user = NSUserName();
+    NSString *pass = _passField.stringValue ?: @"";
+    NSString *path = [_pathField.stringValue stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    if (!path.length) path = @"/";
+
+    _connectBtn.enabled = NO;
+    _statusLabel.stringValue = L(@"Probing…");
+
+    /* If the user supplied a password, obscure it via rclone first so it's
+     * not a clear-text argv entry. Otherwise assume ssh-agent / key auth. */
+    void (^build)(NSString *) = ^(NSString *obscured) {
+        NSMutableString *spec = [NSMutableString stringWithFormat:@":sftp,host=%@,user=%@", host, user];
+        if (port.length) [spec appendFormat:@",port=%@", port];
+        if (obscured.length) [spec appendFormat:@",pass=%@", obscured];
+        [spec appendString:@":"];
+        /* Smoke-test by listing the target path — confirms auth + reachability. */
+        [IDOpusRclone listRemote:spec path:path completion:^(NSArray *entries, NSError *err) {
+            if (err) {
+                self->_connectBtn.enabled = YES;
+                self->_statusLabel.stringValue = err.localizedDescription ?: L(@"Connection failed");
+                return;
+            }
+            (void)entries;
+            NSString *display = [NSString stringWithFormat:@"%@@%@", user, host];
+            NSWindow *parent = self.window.sheetParent;
+            [parent endSheet:self.window returnCode:NSModalResponseOK];
+            [self.window close];
+            if (self.onConnect) self.onConnect(display, spec, path);
+        }];
+    };
+    if (pass.length) {
+        [IDOpusRclone obscurePassword:pass completion:^(NSString *obscured, NSError *err) {
+            if (err) {
+                self->_connectBtn.enabled = YES;
+                self->_statusLabel.stringValue = err.localizedDescription ?: L(@"Could not obscure password");
+                return;
+            }
+            build(obscured);
+        }];
+    } else {
+        build(nil);
+    }
+}
+
+@end
+
+#pragma mark - Remote Browser
+
+/* Minimal remote-browsing window for v1.6. Lists entries via rclone lsjson,
+ * supports navigation and a "Download to…" action that copies the selection
+ * via rclone copy and surfaces progress in the JobsPanel. Full edit semantics
+ * (move, delete, mkdir, rename on remote) land in later releases. */
+@implementation RemoteBrowserWindowController {
+    NSString *_rcloneSpec;
+    NSString *_currentPath;
+    NSString *_displayName;
+    __weak IDOpusAppDelegate *_appDelegate;
+    NSMutableArray<NSDictionary *> *_entries;
+    NSTableView *_tableView;
+    NSTextField *_pathLabel;
+    NSProgressIndicator *_spinner;
+    NSTextField *_statusLabel;
+}
+
+- (instancetype)initWithDisplayName:(NSString *)name
+                           spec:(NSString *)spec
+                           path:(NSString *)path
+                    appDelegate:(IDOpusAppDelegate *)app {
+    NSRect frame = NSMakeRect(0, 0, 720, 480);
+    NSWindow *w = [[NSWindow alloc] initWithContentRect:frame
+        styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
+                   NSWindowStyleMaskResizable | NSWindowStyleMaskMiniaturizable)
+        backing:NSBackingStoreBuffered defer:NO];
+    w.title = [NSString stringWithFormat:@"%@ — %@", name, path];
+    w.releasedWhenClosed = NO;
+    self = [super initWithWindow:w];
+    if (!self) return nil;
+    _rcloneSpec = [spec copy];
+    _currentPath = [path copy];
+    _displayName = [name copy];
+    _appDelegate = app;
+    _entries = [NSMutableArray array];
+
+    NSView *c = w.contentView;
+
+    _pathLabel = [NSTextField labelWithString:path];
+    _pathLabel.font = [NSFont monospacedSystemFontOfSize:12 weight:NSFontWeightMedium];
+    _pathLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    _pathLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [c addSubview:_pathLabel];
+
+    NSButton *up = [NSButton buttonWithTitle:L(@"Parent") target:self action:@selector(goUp:)];
+    up.bezelStyle = NSBezelStyleRounded;
+    up.translatesAutoresizingMaskIntoConstraints = NO;
+    [c addSubview:up];
+
+    NSButton *refresh = [NSButton buttonWithTitle:L(@"Refresh") target:self action:@selector(refresh:)];
+    refresh.bezelStyle = NSBezelStyleRounded;
+    refresh.translatesAutoresizingMaskIntoConstraints = NO;
+    [c addSubview:refresh];
+
+    NSButton *download = [NSButton buttonWithTitle:L(@"Download to DEST…") target:self action:@selector(downloadSelection:)];
+    download.bezelStyle = NSBezelStyleRounded;
+    download.translatesAutoresizingMaskIntoConstraints = NO;
+    [c addSubview:download];
+
+    _spinner = [[NSProgressIndicator alloc] init];
+    _spinner.style = NSProgressIndicatorStyleSpinning;
+    _spinner.controlSize = NSControlSizeSmall;
+    _spinner.displayedWhenStopped = NO;
+    _spinner.translatesAutoresizingMaskIntoConstraints = NO;
+    [c addSubview:_spinner];
+
+    NSScrollView *sv = [[NSScrollView alloc] init];
+    sv.hasVerticalScroller = YES;
+    sv.borderType = NSBezelBorder;
+    sv.translatesAutoresizingMaskIntoConstraints = NO;
+    _tableView = [[NSTableView alloc] init];
+    _tableView.dataSource = self;
+    _tableView.delegate = self;
+    _tableView.doubleAction = @selector(openSelection:);
+    _tableView.target = self;
+    _tableView.allowsMultipleSelection = YES;
+    _tableView.usesAlternatingRowBackgroundColors = YES;
+    _tableView.style = NSTableViewStyleFullWidth;
+
+    struct { NSString *ident; NSString *title; CGFloat w; } cols[] = {
+        {@"name", L(@"Name"), 360},
+        {@"size", L(@"Size"), 100},
+        {@"date", L(@"Date"), 180},
+    };
+    for (int i = 0; i < 3; i++) {
+        NSTableColumn *col = [[NSTableColumn alloc] initWithIdentifier:cols[i].ident];
+        col.title = cols[i].title;
+        col.width = cols[i].w;
+        [_tableView addTableColumn:col];
+    }
+    sv.documentView = _tableView;
+    [c addSubview:sv];
+
+    _statusLabel = [NSTextField labelWithString:@""];
+    _statusLabel.font = [NSFont systemFontOfSize:11];
+    _statusLabel.textColor = [NSColor secondaryLabelColor];
+    _statusLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [c addSubview:_statusLabel];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [up.topAnchor       constraintEqualToAnchor:c.topAnchor constant:12],
+        [up.leadingAnchor   constraintEqualToAnchor:c.leadingAnchor constant:12],
+        [refresh.topAnchor      constraintEqualToAnchor:up.topAnchor],
+        [refresh.leadingAnchor  constraintEqualToAnchor:up.trailingAnchor constant:8],
+        [download.topAnchor     constraintEqualToAnchor:up.topAnchor],
+        [download.leadingAnchor constraintEqualToAnchor:refresh.trailingAnchor constant:8],
+        [_spinner.centerYAnchor constraintEqualToAnchor:up.centerYAnchor],
+        [_spinner.leadingAnchor constraintEqualToAnchor:download.trailingAnchor constant:8],
+        [_pathLabel.centerYAnchor constraintEqualToAnchor:up.centerYAnchor],
+        [_pathLabel.leadingAnchor constraintEqualToAnchor:_spinner.trailingAnchor constant:12],
+        [_pathLabel.trailingAnchor constraintEqualToAnchor:c.trailingAnchor constant:-12],
+
+        [sv.topAnchor       constraintEqualToAnchor:up.bottomAnchor constant:12],
+        [sv.leadingAnchor   constraintEqualToAnchor:c.leadingAnchor constant:12],
+        [sv.trailingAnchor  constraintEqualToAnchor:c.trailingAnchor constant:-12],
+        [sv.bottomAnchor    constraintEqualToAnchor:_statusLabel.topAnchor constant:-8],
+
+        [_statusLabel.leadingAnchor constraintEqualToAnchor:c.leadingAnchor constant:12],
+        [_statusLabel.trailingAnchor constraintEqualToAnchor:c.trailingAnchor constant:-12],
+        [_statusLabel.bottomAnchor constraintEqualToAnchor:c.bottomAnchor constant:-10],
+    ]];
+
+    [self reload];
+    return self;
+}
+
+- (void)reload {
+    [_spinner startAnimation:nil];
+    _statusLabel.stringValue = L(@"Loading…");
+    [IDOpusRclone listRemote:_rcloneSpec path:_currentPath completion:^(NSArray<NSDictionary *> *entries, NSError *err) {
+        [self->_spinner stopAnimation:nil];
+        if (err) {
+            self->_statusLabel.stringValue = err.localizedDescription;
+            return;
+        }
+        [self->_entries setArray:entries];
+        /* Sort: dirs first, then by name case-insensitively. */
+        [self->_entries sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
+            BOOL ad = [a[@"IsDir"] boolValue], bd = [b[@"IsDir"] boolValue];
+            if (ad != bd) return ad ? NSOrderedAscending : NSOrderedDescending;
+            return [(NSString *)a[@"Name"] caseInsensitiveCompare:(NSString *)b[@"Name"]];
+        }];
+        [self->_tableView reloadData];
+        self->_statusLabel.stringValue = [NSString stringWithFormat:L(@"%lu items"),
+            (unsigned long)self->_entries.count];
+        self.window.title = [NSString stringWithFormat:@"%@ — %@", self->_displayName, self->_currentPath];
+        self->_pathLabel.stringValue = self->_currentPath;
+    }];
+}
+
+- (void)goUp:(id)sender {
+    if ([_currentPath isEqualToString:@"/"] || _currentPath.length == 0) return;
+    NSString *parent = [_currentPath stringByDeletingLastPathComponent];
+    if (parent.length == 0) parent = @"/";
+    _currentPath = [parent copy];
+    [self reload];
+}
+
+- (void)refresh:(id)sender { [self reload]; }
+
+- (void)openSelection:(id)sender {
+    NSInteger row = _tableView.clickedRow >= 0 ? _tableView.clickedRow : _tableView.selectedRow;
+    if (row < 0 || row >= (NSInteger)_entries.count) return;
+    NSDictionary *e = _entries[row];
+    if (![e[@"IsDir"] boolValue]) return;
+    NSString *next = [_currentPath stringByAppendingPathComponent:e[@"Name"]];
+    _currentPath = [next copy];
+    [self reload];
+}
+
+- (void)downloadSelection:(id)sender {
+    NSIndexSet *sel = _tableView.selectedRowIndexes;
+    if (sel.count == 0) { _statusLabel.stringValue = L(@"No items selected."); return; }
+    ListerWindowController *dest = _appDelegate.activeDest ?: _appDelegate.activeSource;
+    if (!dest) {
+        NSOpenPanel *panel = [NSOpenPanel openPanel];
+        panel.canChooseFiles = NO;
+        panel.canChooseDirectories = YES;
+        panel.allowsMultipleSelection = NO;
+        panel.prompt = L(@"Download here");
+        if ([panel runModal] != NSModalResponseOK) return;
+        [self _downloadSelectedIndexes:sel toDir:panel.URL.path];
+    } else {
+        [self _downloadSelectedIndexes:sel toDir:dest.currentPath];
+    }
+}
+
+- (void)_downloadSelectedIndexes:(NSIndexSet *)sel toDir:(NSString *)destDir {
+    ProgressSheetController *job = [[ProgressSheetController alloc] init];
+    job.titleLabel.stringValue = [NSString stringWithFormat:L(@"Downloading from %@"), _displayName];
+    [job.spinner startAnimation:nil];
+    [[JobsPanelController shared] addJobRow:job.rowView];
+
+    __block NSUInteger remaining = sel.count;
+    __block BOOL anyFailed = NO;
+    __block NSUInteger i = 0;
+    NSUInteger total = sel.count;
+
+    [sel enumerateIndexesUsingBlock:^(NSUInteger idx, BOOL *stop) {
+        NSDictionary *entry = self->_entries[idx];
+        NSString *name = entry[@"Name"];
+        NSString *remotePath = [self->_currentPath stringByAppendingPathComponent:name];
+        i++;
+        job.fileLabel.stringValue = [NSString stringWithFormat:@"(%lu/%lu) %@",
+            (unsigned long)i, (unsigned long)total, name];
+        [IDOpusRclone copyFromRemote:self->_rcloneSpec
+                          remotePath:remotePath
+                             toLocal:destDir
+                            progress:^(NSString *line) {
+            job.fileLabel.stringValue = line;
+        } completion:^(int status) {
+            if (status != 0) anyFailed = YES;
+            if (--remaining == 0) {
+                [job.spinner stopAnimation:nil];
+                [[JobsPanelController shared] removeJobRow:job.rowView];
+                [self->_appDelegate refreshAllListersShowing:destDir];
+                if (anyFailed) {
+                    [self->_appDelegate showAlert:L(@"Download")
+                                             info:L(@"Some items could not be downloaded. See JobsPanel log for details.")
+                                            style:NSAlertStyleWarning];
+                }
+            }
+        }];
+    }];
+}
+
+#pragma mark NSTableViewDataSource
+
+- (NSInteger)numberOfRowsInTableView:(NSTableView *)tv { return _entries.count; }
+
+- (NSView *)tableView:(NSTableView *)tv
+    viewForTableColumn:(NSTableColumn *)col
+                   row:(NSInteger)row {
+    NSDictionary *e = _entries[row];
+    NSString *ident = col.identifier;
+    NSString *text = @"";
+    if ([ident isEqualToString:@"name"]) {
+        text = e[@"Name"];
+        if ([e[@"IsDir"] boolValue]) text = [text stringByAppendingString:@"/"];
+    } else if ([ident isEqualToString:@"size"]) {
+        if ([e[@"IsDir"] boolValue]) text = @"—";
+        else {
+            char buf[32];
+            pal_format_size([e[@"Size"] longLongValue], buf, sizeof(buf));
+            text = [NSString stringWithUTF8String:buf];
+        }
+    } else if ([ident isEqualToString:@"date"]) {
+        text = e[@"ModTime"] ?: @"";
+        /* rclone returns RFC3339; trim the fractional seconds + Z for display */
+        NSRange dot = [text rangeOfString:@"."];
+        if (dot.location != NSNotFound) text = [text substringToIndex:dot.location];
+        text = [text stringByReplacingOccurrencesOfString:@"T" withString:@" "];
+    }
+    NSTableCellView *cell = [tv makeViewWithIdentifier:ident owner:nil];
+    if (!cell) {
+        cell = [[NSTableCellView alloc] initWithFrame:NSMakeRect(0, 0, col.width, 20)];
+        cell.identifier = ident;
+        NSTextField *tf = [[NSTextField alloc] initWithFrame:cell.bounds];
+        tf.bordered = NO; tf.drawsBackground = NO; tf.editable = NO;
+        tf.font = [NSFont monospacedSystemFontOfSize:12 weight:NSFontWeightRegular];
+        tf.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+        tf.lineBreakMode = NSLineBreakByTruncatingTail;
+        cell.textField = tf;
+        [cell addSubview:tf];
+    }
+    cell.textField.stringValue = text ?: @"";
+    if ([ident isEqualToString:@"name"] && [e[@"IsDir"] boolValue]) {
+        cell.textField.textColor = [NSColor systemCyanColor];
+    } else {
+        cell.textField.textColor = [NSColor labelColor];
+    }
+    return cell;
 }
 
 @end
