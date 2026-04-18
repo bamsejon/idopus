@@ -5745,15 +5745,25 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
 }
 
 - (void)connectToServerAction:(id)sender {
+    /* Remember which Lister was in focus when Connect was invoked — that's
+     * the one we'll flip to the remote on OK, instead of opening a third
+     * window. Fall back to active SOURCE, then operating Lister. */
+    ListerWindowController *target = [self operatingLister] ?: _activeSource ?: _activeDest;
     _connectDialog = [[ConnectDialogController alloc] init];
     __weak typeof(self) weakSelf = self;
+    __weak ListerWindowController *weakTarget = target;
     _connectDialog.onConnect = ^(NSString *name, NSString *spec, NSString *path) {
         typeof(self) s = weakSelf; if (!s) return;
-        /* Open the remote as a real Lister so it participates in SOURCE/DEST
-         * semantics. Window geometry clones the active Lister if any. */
-        NSRect frame = s.activeSource.window.frame;
-        if (frame.size.width < 400) frame = NSMakeRect(100, 100, 800, 600);
-        ListerWindowController *lister = [s newListerWindow:path frame:frame];
+        ListerWindowController *lister = weakTarget;
+        if (!lister) {
+            /* No open Lister to reuse — open a fresh one as a last resort. */
+            NSRect frame = NSMakeRect(100, 100, 800, 600);
+            lister = [s newListerWindow:path frame:frame];
+        }
+        /* Reset history — mixing local and remote paths in the back/forward
+         * list is confusing. */
+        [lister.history removeAllObjects];
+        lister.historyIndex = -1;
         lister.remoteSpec = spec;
         lister.remoteLabel = name;
         [lister loadRemotePath:path];
