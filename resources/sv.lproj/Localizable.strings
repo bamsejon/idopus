@@ -133,3 +133,9 @@
 "Show Button Bank at launch"          = "Visa knappraden vid start";
 "Delete sends items to Trash (recommended)" = "Radera skickar till papperskorgen (rekommenderas)";
 "Reset All Preferences…"              = "Återställ alla inställningar…";
+
+/* --- Rsync --- */
+"Sync"                    = "Synka";
+"Sync Source → Dest…"     = "Synka källa → mål…";
+"Add Sync Profile…"       = "Lägg till synk-profil…";
+"Remove Sync Profile…"    = "Ta bort synk-profil…";

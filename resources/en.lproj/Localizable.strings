@@ -133,3 +133,9 @@
 "Show Button Bank at launch"          = "Show Button Bank at launch";
 "Delete sends items to Trash (recommended)" = "Delete sends items to Trash (recommended)";
 "Reset All Preferences…"              = "Reset All Preferences…";
+
+/* --- Rsync --- */
+"Sync"                    = "Sync";
+"Sync Source → Dest…"     = "Sync Source → Dest…";
+"Add Sync Profile…"       = "Add Sync Profile…";
+"Remove Sync Profile…"    = "Remove Sync Profile…";

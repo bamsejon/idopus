@@ -81,6 +81,10 @@ typedef NS_ENUM(NSInteger, ListerState) {
 - (NSArray<NSDictionary *> *)fileTypeActionsForExt:(NSString *)ext;
 - (NSDictionary *)defaultFileTypeActionForExt:(NSString *)ext;
 - (void)runFileTypeAction:(NSDictionary *)action onPath:(NSString *)path sourceLister:(ListerWindowController *)src;
+- (void)syncSourceToDestAction:(id)sender;
+- (void)addSyncProfileAction:(id)sender;
+- (void)removeSyncProfileAction:(id)sender;
+- (void)runSyncProfile:(NSMenuItem *)sender;
 - (void)toggleQuickLook:(id)sender;
 - (void)sortByAction:(NSMenuItem *)sender;
 - (void)toggleReverseSortAction:(id)sender;
@@ -2213,6 +2217,160 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
 
 @end
 
+#pragma mark - Rsync Sheet
+
+/* Sheet that runs rsync as an NSTask and streams stdout/stderr into an
+ * NSTextView. Cancel terminates the task. The user sees exactly the
+ * rsync log they'd see in a terminal. */
+@interface RsyncSheetController : NSWindowController
+@property (nonatomic, strong) NSTextView *textView;
+@property (nonatomic, strong) NSButton *cancelButton;
+@property (nonatomic, strong) NSButton *closeButton;
+@property (nonatomic, strong) NSTask *task;
+@property (atomic, assign) BOOL finished;
+
+- (void)runArgs:(NSArray<NSString *> *)args
+          title:(NSString *)title
+     sourceWindow:(NSWindow *)srcWin
+     completion:(void (^)(int status))completion;
+@end
+
+@implementation RsyncSheetController
+
+- (instancetype)init {
+    NSRect frame = NSMakeRect(0, 0, 640, 420);
+    NSWindow *w = [[NSWindow alloc] initWithContentRect:frame
+                                              styleMask:(NSWindowStyleMaskTitled |
+                                                         NSWindowStyleMaskResizable)
+                                                backing:NSBackingStoreBuffered
+                                                  defer:NO];
+    self = [super initWithWindow:w];
+    if (!self) return nil;
+
+    NSView *c = w.contentView;
+
+    NSScrollView *sv = [[NSScrollView alloc] init];
+    sv.hasVerticalScroller = YES;
+    sv.autohidesScrollers = NO;
+    sv.translatesAutoresizingMaskIntoConstraints = NO;
+
+    _textView = [[NSTextView alloc] init];
+    _textView.font = [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightRegular];
+    _textView.editable = NO;
+    _textView.richText = NO;
+    _textView.drawsBackground = YES;
+    _textView.backgroundColor = [NSColor textBackgroundColor];
+    _textView.autoresizingMask = NSViewWidthSizable;
+    _textView.textContainer.widthTracksTextView = YES;
+    sv.documentView = _textView;
+    [c addSubview:sv];
+
+    _cancelButton = [NSButton buttonWithTitle:L(@"Cancel") target:self action:@selector(cancel:)];
+    _cancelButton.keyEquivalent = @"\033";
+    _cancelButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [c addSubview:_cancelButton];
+
+    _closeButton = [NSButton buttonWithTitle:L(@"OK") target:self action:@selector(closeSheet:)];
+    _closeButton.keyEquivalent = @"\r";
+    _closeButton.translatesAutoresizingMaskIntoConstraints = NO;
+    _closeButton.hidden = YES;
+    [c addSubview:_closeButton];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [sv.topAnchor      constraintEqualToAnchor:c.topAnchor constant:12],
+        [sv.leadingAnchor  constraintEqualToAnchor:c.leadingAnchor constant:12],
+        [sv.trailingAnchor constraintEqualToAnchor:c.trailingAnchor constant:-12],
+        [sv.bottomAnchor   constraintEqualToAnchor:_cancelButton.topAnchor constant:-10],
+
+        [_cancelButton.trailingAnchor constraintEqualToAnchor:c.trailingAnchor constant:-12],
+        [_cancelButton.bottomAnchor   constraintEqualToAnchor:c.bottomAnchor constant:-12],
+
+        [_closeButton.trailingAnchor constraintEqualToAnchor:c.trailingAnchor constant:-12],
+        [_closeButton.bottomAnchor   constraintEqualToAnchor:c.bottomAnchor constant:-12],
+    ]];
+    return self;
+}
+
+- (void)appendText:(NSString *)s {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSAttributedString *a = [[NSAttributedString alloc] initWithString:s
+            attributes:@{ NSFontAttributeName: self.textView.font,
+                          NSForegroundColorAttributeName: [NSColor labelColor] }];
+        [self.textView.textStorage appendAttributedString:a];
+        [self.textView scrollRangeToVisible:NSMakeRange(self.textView.textStorage.length, 0)];
+    });
+}
+
+- (void)cancel:(id)sender {
+    if (self.task.isRunning) [self.task terminate];
+    self.cancelButton.enabled = NO;
+    [self appendText:@"\n[cancelled]\n"];
+}
+
+- (void)closeSheet:(id)sender {
+    NSWindow *parent = self.window.sheetParent;
+    if (parent) [parent endSheet:self.window];
+    else        [self.window close];
+}
+
+- (void)runArgs:(NSArray<NSString *> *)args
+          title:(NSString *)title
+     sourceWindow:(NSWindow *)srcWin
+     completion:(void (^)(int status))completion {
+
+    self.window.title = title;
+    [self appendText:[NSString stringWithFormat:@"$ /usr/bin/rsync %@\n\n",
+                      [args componentsJoinedByString:@" "]]];
+    [srcWin beginSheet:self.window completionHandler:nil];
+
+    self.task = [[NSTask alloc] init];
+    self.task.executableURL = [NSURL fileURLWithPath:@"/usr/bin/rsync"];
+    self.task.arguments = args;
+
+    NSPipe *outPipe = [NSPipe pipe];
+    NSPipe *errPipe = [NSPipe pipe];
+    self.task.standardOutput = outPipe;
+    self.task.standardError = errPipe;
+
+    __weak typeof(self) weakSelf = self;
+    NSFileHandle *outRd = outPipe.fileHandleForReading;
+    NSFileHandle *errRd = errPipe.fileHandleForReading;
+    outRd.readabilityHandler = ^(NSFileHandle *fh) {
+        NSData *d = fh.availableData;
+        if (d.length == 0) { fh.readabilityHandler = nil; return; }
+        NSString *s = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+        if (s) [weakSelf appendText:s];
+    };
+    errRd.readabilityHandler = ^(NSFileHandle *fh) {
+        NSData *d = fh.availableData;
+        if (d.length == 0) { fh.readabilityHandler = nil; return; }
+        NSString *s = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+        if (s) [weakSelf appendText:s];
+    };
+    self.task.terminationHandler = ^(NSTask *t) {
+        int status = t.terminationStatus;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            typeof(self) s = weakSelf; if (!s) return;
+            s.finished = YES;
+            [s appendText:[NSString stringWithFormat:@"\n[rsync exited with status %d]\n", status]];
+            s.cancelButton.hidden = YES;
+            s.closeButton.hidden = NO;
+            [s.window makeFirstResponder:s.closeButton];
+            if (completion) completion(status);
+        });
+    };
+
+    NSError *err = nil;
+    if (![self.task launchAndReturnError:&err]) {
+        [self appendText:[NSString stringWithFormat:@"\n[launch failed: %@]\n", err.localizedDescription]];
+        self.finished = YES;
+        self.cancelButton.hidden = YES;
+        self.closeButton.hidden = NO;
+    }
+}
+
+@end
+
 #pragma mark - Preferences Window
 
 /* Simple preferences panel bound to NSUserDefaults. Each checkbox writes its
@@ -2479,6 +2637,14 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     [funcMenu addItem:[NSMenuItem separatorItem]];
     [funcMenu addItemWithTitle:L(@"Add File Type Action…")    action:@selector(addFileTypeActionAction:)    keyEquivalent:@""];
     [funcMenu addItemWithTitle:L(@"Remove File Type Action…") action:@selector(manageFileTypeActionsAction:) keyEquivalent:@""];
+
+    /* Sync submenu (rsync) */
+    [funcMenu addItem:[NSMenuItem separatorItem]];
+    NSMenuItem *syncItem = [funcMenu addItemWithTitle:L(@"Sync") action:NULL keyEquivalent:@""];
+    NSMenu *syncSub = [[NSMenu alloc] initWithTitle:L(@"Sync")];
+    syncSub.delegate = self;      /* rebuild with saved profiles on open */
+    syncSub.autoenablesItems = NO;
+    syncItem.submenu = syncSub;
     funcItem.submenu = funcMenu;
     [mainMenu addItem:funcItem];
 
@@ -2725,7 +2891,50 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
 }
 
 - (void)menuNeedsUpdate:(NSMenu *)menu {
-    if (![menu.title isEqualToString:@"Bookmarks"]) return;
+    /* Sync submenu — rebuild with saved rsync profiles */
+    if ([menu.title isEqualToString:L(@"Sync")]) {
+        [menu removeAllItems];
+        NSMenuItem *sync = [menu addItemWithTitle:L(@"Sync Source → Dest…")
+                                           action:@selector(syncSourceToDestAction:)
+                                    keyEquivalent:@""];
+        sync.target = self;
+
+        NSArray<NSDictionary *> *profiles = [[NSUserDefaults standardUserDefaults]
+                                              arrayForKey:@"rsyncProfiles"] ?: @[];
+        if (profiles.count > 0) {
+            [menu addItem:[NSMenuItem separatorItem]];
+            NSMenuItem *header = [[NSMenuItem alloc] initWithTitle:@"Saved profiles"
+                                                            action:NULL
+                                                     keyEquivalent:@""];
+            header.enabled = NO;
+            [menu addItem:header];
+            for (NSDictionary *p in profiles) {
+                NSString *t = p[@"name"] ?: [NSString stringWithFormat:@"%@ → %@",
+                                             p[@"source"], p[@"dest"]];
+                if ([p[@"dryRun"] boolValue]) t = [NSString stringWithFormat:@"%@ (dry run)", t];
+                NSMenuItem *it = [menu addItemWithTitle:t
+                                                 action:@selector(runSyncProfile:)
+                                          keyEquivalent:@""];
+                it.target = self;
+                it.representedObject = p;
+            }
+        }
+        [menu addItem:[NSMenuItem separatorItem]];
+        NSMenuItem *add = [menu addItemWithTitle:L(@"Add Sync Profile…")
+                                          action:@selector(addSyncProfileAction:)
+                                   keyEquivalent:@""];
+        add.target = self;
+        if (profiles.count > 0) {
+            NSMenuItem *rm = [menu addItemWithTitle:L(@"Remove Sync Profile…")
+                                             action:@selector(removeSyncProfileAction:)
+                                      keyEquivalent:@""];
+            rm.target = self;
+        }
+        return;
+    }
+
+    /* Bookmarks submenu */
+    if (![menu.title isEqualToString:L(@"Bookmarks")]) return;
     [menu removeAllItems];
 
     for (NSDictionary *bm in [self builtInBookmarks]) {
@@ -3335,6 +3544,260 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
                info:[NSString stringWithFormat:@"%lu item%@ in SOURCE not present in DEST (by name).",
                      (unsigned long)idx.count, idx.count == 1 ? @"" : @"s"]
               style:NSAlertStyleInformational];
+}
+
+#pragma mark Rsync
+
+- (NSArray<NSString *> *)rsyncArgsFromProfile:(NSDictionary *)p {
+    NSMutableArray *args = [NSMutableArray array];
+    if ([p[@"archive"]  boolValue]) [args addObject:@"-a"];
+    [args addObject:@"-v"];               /* always verbose so user sees what's happening */
+    [args addObject:@"--human-readable"];
+    [args addObject:@"--info=progress2"]; /* overall progress line */
+    if ([p[@"compress"] boolValue]) [args addObject:@"-z"];
+    if ([p[@"delete"]   boolValue]) [args addObject:@"--delete"];
+    if ([p[@"dryRun"]   boolValue]) [args addObject:@"-n"];
+    NSString *extra = [p[@"extraArgs"] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    if (extra.length) {
+        /* naive split on whitespace — good enough for simple flags / --exclude='x' */
+        for (NSString *a in [extra componentsSeparatedByString:@" "]) {
+            if (a.length) [args addObject:a];
+        }
+    }
+    NSString *src = p[@"source"];
+    NSString *dst = p[@"dest"];
+    if (!src.length || !dst.length) return nil;
+    /* rsync semantics: trailing / on source = copy contents; without = copy the dir itself.
+     * Since users usually want "mirror the contents", append a / if not there and source is local dir. */
+    if (![src hasSuffix:@"/"]) src = [src stringByAppendingString:@"/"];
+    [args addObject:[src stringByExpandingTildeInPath]];
+    [args addObject:[dst stringByExpandingTildeInPath]];
+    return args;
+}
+
+- (void)runRsyncWithProfile:(NSDictionary *)profile
+               sourceWindow:(NSWindow *)srcWin {
+    NSArray<NSString *> *args = [self rsyncArgsFromProfile:profile];
+    if (!args) {
+        [self showAlert:@"Sync" info:@"Source and destination are required."
+                  style:NSAlertStyleWarning];
+        return;
+    }
+    NSString *title = profile[@"name"]
+        ? [NSString stringWithFormat:@"Sync — %@%@", profile[@"name"],
+           [profile[@"dryRun"] boolValue] ? @" (dry run)" : @""]
+        : [NSString stringWithFormat:@"rsync%@",
+           [profile[@"dryRun"] boolValue] ? @" (dry run)" : @""];
+
+    RsyncSheetController *sheet = [[RsyncSheetController alloc] init];
+    __block RsyncSheetController *keepAlive = sheet;
+    [sheet runArgs:args title:title sourceWindow:srcWin completion:^(int status) {
+        /* Refresh affected listers — dest might have changed. */
+        NSString *dest = [profile[@"dest"] stringByExpandingTildeInPath];
+        if ([dest rangeOfString:@":"].location == NSNotFound) {
+            /* local dest → refresh */
+            [self refreshAllListersShowing:dest];
+        }
+        (void)keepAlive;
+    }];
+    /* Keep sheet alive until close */
+    objc_setAssociatedObject(srcWin, "activeRsyncSheet", sheet, OBJC_ASSOCIATION_RETAIN);
+    (void)keepAlive;
+}
+
+/* Build shared accessory for sync dialog (source, dest, options, extraArgs) */
+- (NSDictionary *)buildSyncForm:(NSView **)outView profile:(NSDictionary *)p {
+    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 520, 240)];
+
+    NSTextField *nameLbl = [NSTextField labelWithString:@"Name:"];
+    nameLbl.frame = NSMakeRect(0, 208, 70, 20);
+    NSTextField *nameField = [[NSTextField alloc] initWithFrame:NSMakeRect(74, 204, 440, 24)];
+    nameField.placeholderString = @"e.g. Backup Documents";
+    nameField.stringValue = p[@"name"] ?: @"";
+
+    NSTextField *srcLbl = [NSTextField labelWithString:@"Source:"];
+    srcLbl.frame = NSMakeRect(0, 176, 70, 20);
+    NSTextField *srcField = [[NSTextField alloc] initWithFrame:NSMakeRect(74, 172, 440, 24)];
+    srcField.placeholderString = @"local path or user@host:/path";
+    srcField.stringValue = p[@"source"] ?: @"";
+
+    NSTextField *dstLbl = [NSTextField labelWithString:@"Dest:"];
+    dstLbl.frame = NSMakeRect(0, 144, 70, 20);
+    NSTextField *dstField = [[NSTextField alloc] initWithFrame:NSMakeRect(74, 140, 440, 24)];
+    dstField.placeholderString = @"local path or user@host:/path";
+    dstField.stringValue = p[@"dest"] ?: @"";
+
+    NSButton *archive  = [NSButton checkboxWithTitle:@"Archive mode (-a: recursive, preserve)" target:nil action:nil];
+    archive.frame  = NSMakeRect(74, 112, 440, 20);
+    archive.state = ([p objectForKey:@"archive"] ? [p[@"archive"] boolValue] : YES) ? NSControlStateValueOn : NSControlStateValueOff;
+
+    NSButton *compress = [NSButton checkboxWithTitle:@"Compress during transfer (-z)" target:nil action:nil];
+    compress.frame = NSMakeRect(74, 88, 440, 20);
+    compress.state = [p[@"compress"] boolValue] ? NSControlStateValueOn : NSControlStateValueOff;
+
+    NSButton *delete_  = [NSButton checkboxWithTitle:@"Delete extras at destination (--delete, DANGEROUS)" target:nil action:nil];
+    delete_.frame  = NSMakeRect(74, 64, 440, 20);
+    delete_.state = [p[@"delete"] boolValue] ? NSControlStateValueOn : NSControlStateValueOff;
+
+    NSButton *dryRun   = [NSButton checkboxWithTitle:@"Dry run — preview only, no actual changes (-n)" target:nil action:nil];
+    dryRun.frame   = NSMakeRect(74, 40, 440, 20);
+    dryRun.state = [p[@"dryRun"] boolValue] ? NSControlStateValueOn : NSControlStateValueOff;
+
+    NSTextField *extraLbl = [NSTextField labelWithString:@"Extra:"];
+    extraLbl.frame = NSMakeRect(0, 8, 70, 20);
+    NSTextField *extraField = [[NSTextField alloc] initWithFrame:NSMakeRect(74, 4, 440, 24)];
+    extraField.placeholderString = @"extra rsync flags, e.g. --exclude='.DS_Store'";
+    extraField.stringValue = p[@"extraArgs"] ?: @"";
+
+    for (NSView *v in @[nameLbl, nameField, srcLbl, srcField, dstLbl, dstField,
+                        archive, compress, delete_, dryRun, extraLbl, extraField])
+        [acc addSubview:v];
+
+    if (outView) *outView = acc;
+    return @{ @"name": nameField, @"source": srcField, @"dest": dstField,
+              @"archive": archive, @"compress": compress, @"delete": delete_,
+              @"dryRun": dryRun, @"extraArgs": extraField };
+}
+
+- (NSDictionary *)readSyncForm:(NSDictionary *)fields {
+    NSString *(^tv)(NSString *) = ^(NSString *k) {
+        return [((NSTextField *)fields[k]).stringValue
+                 stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    };
+    BOOL (^cv)(NSString *) = ^(NSString *k) {
+        return (BOOL)(((NSButton *)fields[k]).state == NSControlStateValueOn);
+    };
+    return @{
+        @"name":      tv(@"name")      ?: @"",
+        @"source":    tv(@"source")    ?: @"",
+        @"dest":      tv(@"dest")      ?: @"",
+        @"archive":   @(cv(@"archive")),
+        @"compress":  @(cv(@"compress")),
+        @"delete":    @(cv(@"delete")),
+        @"dryRun":    @(cv(@"dryRun")),
+        @"extraArgs": tv(@"extraArgs") ?: @"",
+    };
+}
+
+- (void)syncSourceToDestAction:(id)sender {
+    ListerWindowController *src = _activeSource;
+    ListerWindowController *dst = _activeDest;
+    NSDictionary *seed = @{
+        @"name":     @"",
+        @"source":   src.currentPath ?: @"",
+        @"dest":     dst.currentPath ?: @"",
+        @"archive":  @YES,
+        @"compress": @NO,
+        @"delete":   @NO,
+        @"dryRun":   @NO,
+        @"extraArgs": @"",
+    };
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Sync with rsync";
+    alert.informativeText = @"Source / Dest can be local or remote (user@host:/path). Uses /usr/bin/rsync — existing SSH keys in ~/.ssh/ apply to remote targets.";
+    NSView *acc = nil;
+    NSDictionary *fields = [self buildSyncForm:&acc profile:seed];
+    alert.accessoryView = acc;
+    [alert addButtonWithTitle:@"Run"];
+    [alert addButtonWithTitle:@"Save Profile"];
+    [alert addButtonWithTitle:@"Cancel"];
+    [alert.window setInitialFirstResponder:fields[@"source"]];
+
+    NSModalResponse r = [alert runModal];
+    if (r == NSAlertThirdButtonReturn) return;  /* Cancel */
+
+    NSDictionary *profile = [self readSyncForm:fields];
+    if (!((NSString *)profile[@"source"]).length || !((NSString *)profile[@"dest"]).length) {
+        [self showAlert:@"Sync" info:@"Source and destination are required." style:NSAlertStyleWarning];
+        return;
+    }
+
+    if (r == NSAlertSecondButtonReturn) {
+        /* Save profile — require a name */
+        if (!((NSString *)profile[@"name"]).length) {
+            [self showAlert:@"Save Profile"
+                       info:@"Profile needs a name."
+                      style:NSAlertStyleInformational];
+            return;
+        }
+        NSMutableArray *all = [[[NSUserDefaults standardUserDefaults] arrayForKey:@"rsyncProfiles"] mutableCopy] ?: [NSMutableArray array];
+        [all addObject:profile];
+        [[NSUserDefaults standardUserDefaults] setObject:all forKey:@"rsyncProfiles"];
+        return;
+    }
+
+    /* Run */
+    NSWindow *parent = src.window ?: dst.window ?: [NSApp keyWindow];
+    [self runRsyncWithProfile:profile sourceWindow:parent];
+}
+
+- (void)runSyncProfile:(NSMenuItem *)sender {
+    NSDictionary *p = sender.representedObject;
+    if (!p) return;
+    NSWindow *parent = (_activeSource.window ?: _activeDest.window ?: [NSApp keyWindow]);
+    [self runRsyncWithProfile:p sourceWindow:parent];
+}
+
+- (void)addSyncProfileAction:(id)sender {
+    /* Same dialog as syncSourceToDestAction but always saves (no Run button) */
+    ListerWindowController *src = _activeSource;
+    ListerWindowController *dst = _activeDest;
+    NSDictionary *seed = @{
+        @"name":     @"",
+        @"source":   src.currentPath ?: @"",
+        @"dest":     dst.currentPath ?: @"",
+        @"archive":  @YES,
+        @"compress": @NO,
+        @"delete":   @NO,
+        @"dryRun":   @NO,
+        @"extraArgs": @"",
+    };
+
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Add Sync Profile";
+    NSView *acc = nil;
+    NSDictionary *fields = [self buildSyncForm:&acc profile:seed];
+    alert.accessoryView = acc;
+    [alert addButtonWithTitle:@"Save"];
+    [alert addButtonWithTitle:@"Cancel"];
+    if ([alert runModal] != NSAlertFirstButtonReturn) return;
+    NSDictionary *profile = [self readSyncForm:fields];
+    if (!((NSString *)profile[@"name"]).length ||
+        !((NSString *)profile[@"source"]).length ||
+        !((NSString *)profile[@"dest"]).length) {
+        [self showAlert:@"Save Profile"
+                   info:@"Name, source and destination are all required."
+                  style:NSAlertStyleWarning];
+        return;
+    }
+    NSMutableArray *all = [[[NSUserDefaults standardUserDefaults] arrayForKey:@"rsyncProfiles"] mutableCopy] ?: [NSMutableArray array];
+    [all addObject:profile];
+    [[NSUserDefaults standardUserDefaults] setObject:all forKey:@"rsyncProfiles"];
+}
+
+- (void)removeSyncProfileAction:(id)sender {
+    NSArray<NSDictionary *> *all = [[NSUserDefaults standardUserDefaults] arrayForKey:@"rsyncProfiles"] ?: @[];
+    if (all.count == 0) {
+        [self showAlert:@"Remove Sync Profile" info:@"No profiles to remove." style:NSAlertStyleInformational];
+        return;
+    }
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = @"Remove Sync Profile";
+    NSPopUpButton *popup = [[NSPopUpButton alloc] initWithFrame:NSMakeRect(0, 0, 360, 26)];
+    for (NSDictionary *p in all) {
+        [popup addItemWithTitle:[NSString stringWithFormat:@"%@ — %@ → %@",
+                                 p[@"name"], p[@"source"], p[@"dest"]]];
+    }
+    alert.accessoryView = popup;
+    [alert addButtonWithTitle:@"Remove"];
+    [alert addButtonWithTitle:@"Cancel"];
+    if ([alert runModal] != NSAlertFirstButtonReturn) return;
+    NSInteger idx = popup.indexOfSelectedItem;
+    if (idx < 0 || idx >= (NSInteger)all.count) return;
+    NSMutableArray *updated = [all mutableCopy];
+    [updated removeObjectAtIndex:idx];
+    [[NSUserDefaults standardUserDefaults] setObject:updated forKey:@"rsyncProfiles"];
 }
 
 #pragma mark File type actions
