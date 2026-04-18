@@ -5620,6 +5620,8 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     NSRect bf = NSMakeRect(NSMaxX(lf), vis.origin.y, bankW, vis.size.height);
     NSRect rf = NSMakeRect(NSMaxX(bf), vis.origin.y,
                             vis.size.width - listerW - bankW, vis.size.height);
+    /* Parent (right) first — bank is its child and would otherwise be
+     * dragged along when right moves, undoing the explicit bank setFrame. */
     [left.window setFrame:lf display:YES animate:YES];
     [right.window setFrame:rf display:YES animate:YES];
     [_buttonBankPanel.window setFrame:bf display:YES animate:NO];
@@ -5702,15 +5704,19 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     CGFloat bankW = MAX(80, MIN(400, bankOld.size.width));
     if (bankW < 80) bankW = [ButtonBankPanelController desiredWidth];
     NSRect bank = NSMakeRect(NSMaxX(lf), lf.origin.y, bankW, lf.size.height);
-
-    _suppressSnap = YES;
-    [_buttonBankPanel.window setFrame:bank display:YES animate:NO];
-    /* Snap DEST flush against the bank's right edge, same vertical extent. */
     NSRect newR = right.window.frame;
     newR.origin.x = NSMaxX(bank);
     newR.origin.y = lf.origin.y;
     newR.size.height = lf.size.height;
+
+    _suppressSnap = YES;
+    /* ORDER MATTERS. If the bank is a child of `right`, moving `right` also
+     * drags the bank by the stale parent→child offset — which would undo
+     * the bank position we set a line earlier. So: set the parent (right)
+     * first, then snap the bank into place; the bank's new offset is then
+     * recorded correctly for future parent moves. */
     [right.window setFrame:newR display:YES animate:NO];
+    [_buttonBankPanel.window setFrame:bank display:YES animate:NO];
     _lastListerFrames[[NSValue valueWithNonretainedObject:right.window]] =
         [NSValue valueWithRect:newR];
     _suppressSnap = NO;
