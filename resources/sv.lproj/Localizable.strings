@@ -233,3 +233,13 @@
 "This removes every entry under SAVED, including stored passwords. Cannot be undone." = "Tar bort alla poster under SPARADE, inklusive sparade lösenord. Kan inte ångras.";
 "Clear"                   = "Rensa";
 "(missing host — right-click to remove)" = "(saknar värd — högerklicka för att ta bort)";
+"%lu items to %@"         = "%lu objekt till %@";
+"Permanently delete %lu item(s) on %@? This cannot be undone." = "Radera %lu objekt permanent på %@? Kan inte ångras.";
+"Some items could not be deleted" = "Några objekt kunde inte raderas";
+"Some items could not be transferred." = "Några objekt kunde inte överföras.";
+"Some items could not be moved." = "Några objekt kunde inte flyttas.";
+"Some items could not be copied." = "Några objekt kunde inte kopieras.";
+"MakeDir failed"          = "Skapande av mapp misslyckades";
+"Rename failed"           = "Namnbyte misslyckades";
+"Move from remote to local isn't supported yet — copy the files, then delete them on the remote." = "Flytt från fjärr till lokalt stöds inte än — kopiera filerna och radera dem på fjärren.";
+"Copy between two different remotes isn't supported yet." = "Kopiering mellan två olika fjärrar stöds inte än.";

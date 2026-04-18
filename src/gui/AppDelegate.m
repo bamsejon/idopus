@@ -59,6 +59,26 @@ typedef NS_ENUM(NSInteger, ListerState) {
                    toLocal:(NSString *)localDir
                   progress:(void (^)(NSString *line))progress
                 completion:(void (^)(int status))completion;
++ (NSTask *)copyLocalPath:(NSString *)localPath
+                 toRemote:(NSString *)remoteSpec
+                 destPath:(NSString *)remoteDestDir
+                 progress:(void (^)(NSString *line))progress
+               completion:(void (^)(int status))completion;
++ (void)makeRemoteDir:(NSString *)remoteSpec
+                 path:(NSString *)remotePath
+           completion:(void (^)(int status, NSString *errOut))completion;
++ (void)deleteRemotePath:(NSString *)remoteSpec
+                    path:(NSString *)remotePath
+                   isDir:(BOOL)isDir
+              completion:(void (^)(int status, NSString *errOut))completion;
++ (void)moveRemoteFrom:(NSString *)remoteSpec
+               fromPath:(NSString *)fromPath
+                 toPath:(NSString *)toPath
+             completion:(void (^)(int status, NSString *errOut))completion;
++ (void)copyRemoteFrom:(NSString *)remoteSpec
+               fromPath:(NSString *)fromPath
+                 toPath:(NSString *)toPath
+             completion:(void (^)(int status, NSString *errOut))completion;
 @end
 
 /* Forward-declared remote UI classes — full implementations near the bottom
@@ -769,6 +789,23 @@ typedef NS_ENUM(NSInteger, ListerState) {
 
     NSString *fromPath = [_owner.currentPath stringByAppendingPathComponent:oldName];
     NSString *toPath   = [_owner.currentPath stringByAppendingPathComponent:newName];
+
+    if (_owner.isRemote) {
+        __weak NSTextField *weakTF = tf;
+        [IDOpusRclone moveRemoteFrom:_owner.remoteSpec fromPath:fromPath toPath:toPath
+                           completion:^(int status, NSString *errOut) {
+            if (status != 0) {
+                weakTF.stringValue = oldName;
+                [_owner.appDelegate showAlert:@"Rename failed"
+                                         info:errOut ?: @"rclone moveto failed"
+                                        style:NSAlertStyleWarning];
+                return;
+            }
+            [_owner reloadBuffer];
+        }];
+        return;
+    }
+
     NSError *err = nil;
     if (![[NSFileManager defaultManager] moveItemAtPath:fromPath toPath:toPath error:&err]) {
         tf.stringValue = oldName;
@@ -5533,11 +5570,59 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
 - (void)deleteAction:(id)sender {
     ListerWindowController *src = [self operatingLister];
     if (!src) return;
-    NSArray<NSString *> *paths = [src selectedPaths];
-    if (paths.count == 0) {
+    NSArray<NSString *> *names = [src selectedNames];
+    if (names.count == 0) {
         [self showAlert:@"Delete" info:@"No items selected." style:NSAlertStyleInformational];
         return;
     }
+
+    /* Remote delete: confirm with a permanent-delete wording (remote has no
+     * Trash) and dispatch per-item rclone deletefile / purge. */
+    if (src.isRemote) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = [NSString stringWithFormat:
+            L(@"Permanently delete %lu item(s) on %@? This cannot be undone."),
+            (unsigned long)names.count, src.remoteLabel ?: @"remote"];
+        NSMutableArray *preview = [NSMutableArray array];
+        for (NSUInteger i = 0; i < MIN(5u, names.count); i++) [preview addObject:names[i]];
+        if (names.count > 5) [preview addObject:[NSString stringWithFormat:@"… and %lu more",
+                                                  (unsigned long)(names.count - 5)]];
+        alert.informativeText = [preview componentsJoinedByString:@"\n"];
+        alert.alertStyle = NSAlertStyleCritical;
+        [alert addButtonWithTitle:L(@"Delete")];
+        [alert addButtonWithTitle:L(@"Cancel")];
+        if ([alert runModal] != NSAlertFirstButtonReturn) return;
+
+        __block NSUInteger remaining = names.count;
+        __block NSMutableArray *failed = [NSMutableArray array];
+        dir_buffer_t *buf = src.dataSource.buffer;
+        NSIndexSet *rows = src.tableView.selectedRowIndexes;
+        __block NSUInteger idx = 0;
+        [rows enumerateIndexesUsingBlock:^(NSUInteger row, BOOL *stop) {
+            dir_entry_t *e = buf ? dir_buffer_get_entry(buf, (int)row) : NULL;
+            BOOL isDir = e && dir_entry_is_dir(e);
+            NSString *name = names[idx++];
+            NSString *path = [src.currentPath stringByAppendingPathComponent:name];
+            [IDOpusRclone deleteRemotePath:src.remoteSpec path:path isDir:isDir
+                                completion:^(int status, NSString *errOut) {
+                if (status != 0) {
+                    [failed addObject:[NSString stringWithFormat:@"%@: %@",
+                                        name, errOut ?: @"rclone failed"]];
+                }
+                if (--remaining == 0) {
+                    [src reloadBuffer];
+                    if (failed.count > 0) {
+                        [self showAlert:L(@"Some items could not be deleted")
+                                   info:[failed componentsJoinedByString:@"\n"]
+                                  style:NSAlertStyleWarning];
+                    }
+                }
+            }];
+        }];
+        return;
+    }
+
+    NSArray<NSString *> *paths = [src selectedPaths];
 
     NSUserDefaults *u = [NSUserDefaults standardUserDefaults];
     BOOL toTrash = [u objectForKey:@"prefDeleteToTrash"] ? [u boolForKey:@"prefDeleteToTrash"] : YES;
@@ -5548,7 +5633,6 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
                     (unsigned long)paths.count, paths.count == 1 ? @"" : @"s"]
         : [NSString stringWithFormat:@"Permanently delete %lu item%@? This cannot be undone.",
                     (unsigned long)paths.count, paths.count == 1 ? @"" : @"s"];
-    NSArray<NSString *> *names = [src selectedNames];
     NSMutableArray *preview = [NSMutableArray array];
     for (NSUInteger i = 0; i < MIN(5u, names.count); i++) [preview addObject:names[i]];
     if (names.count > 5) [preview addObject:[NSString stringWithFormat:@"… and %lu more", (unsigned long)(names.count - 5)]];
@@ -5641,6 +5725,19 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     if (name.length == 0) return;
 
     NSString *newPath = [src.currentPath stringByAppendingPathComponent:name];
+
+    if (src.isRemote) {
+        [IDOpusRclone makeRemoteDir:src.remoteSpec path:newPath
+                          completion:^(int status, NSString *errOut) {
+            if (status != 0) {
+                [self showAlert:L(@"MakeDir failed") info:errOut ?: L(@"rclone mkdir failed") style:NSAlertStyleWarning];
+                return;
+            }
+            [src reloadBuffer];
+        }];
+        return;
+    }
+
     NSError *err = nil;
     if (![[NSFileManager defaultManager] createDirectoryAtPath:newPath
                                    withIntermediateDirectories:NO
@@ -5682,6 +5779,19 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
 
     NSString *oldPath = [src.currentPath stringByAppendingPathComponent:oldName];
     NSString *newPath = [src.currentPath stringByAppendingPathComponent:newName];
+
+    if (src.isRemote) {
+        [IDOpusRclone moveRemoteFrom:src.remoteSpec fromPath:oldPath toPath:newPath
+                           completion:^(int status, NSString *errOut) {
+            if (status != 0) {
+                [self showAlert:L(@"Rename failed") info:errOut ?: L(@"rclone moveto failed") style:NSAlertStyleWarning];
+                return;
+            }
+            [src reloadBuffer];
+        }];
+        return;
+    }
+
     NSError *err = nil;
     if (![[NSFileManager defaultManager] moveItemAtPath:oldPath toPath:newPath error:&err]) {
         [self showAlert:@"Rename failed" info:err.localizedDescription style:NSAlertStyleWarning];
@@ -5746,31 +5856,48 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
      * remote has to go through rclone. v1.6 ships remote→local only;
      * remote→remote and local→remote land in v1.7. */
     if (src.isRemote || dst.isRemote) {
-        if (isMove) {
-            [self showAlert:@"Move"
-                       info:L(@"Move to/from remote servers arrives in v1.7. Use Copy for now, then remove the remote file manually.")
+        NSArray<NSString *> *names = [src selectedNames];
+        if (names.count == 0) {
+            [self showAlert:isMove ? L(@"Move") : L(@"Copy")
+                       info:L(@"No items selected in source lister.")
                       style:NSAlertStyleInformational];
             return;
         }
-        if (src.isRemote && dst.isRemote) {
-            [self showAlert:@"Copy"
-                       info:L(@"Remote-to-remote copy arrives in v1.7.")
-                      style:NSAlertStyleInformational];
+        if (src.isRemote && !dst.isRemote) {
+            /* remote → local download. Move not supported yet — we'd have to
+             * download then deleteRemote, with consistency risk if download
+             * half-fails. Deferred to a later release. */
+            if (isMove) {
+                [self showAlert:L(@"Move")
+                           info:L(@"Move from remote to local isn't supported yet — copy the files, then delete them on the remote.")
+                          style:NSAlertStyleInformational];
+                return;
+            }
+            [self remoteDownloadNames:names fromLister:src toLocalDir:dst.currentPath];
             return;
         }
         if (!src.isRemote && dst.isRemote) {
-            [self showAlert:@"Copy"
-                       info:L(@"Upload from local to remote arrives in v1.7. Download (remote → local) works today.")
-                      style:NSAlertStyleInformational];
+            /* local → remote upload. Uses rclone copyto per selected item;
+             * isMove triggers a local delete after each successful transfer. */
+            NSArray<NSString *> *paths = [src selectedPaths];
+            [self remoteUploadPaths:paths names:names
+                          toRemote:dst.remoteSpec
+                      remoteDestDir:dst.currentPath
+                         remoteLbl:dst.remoteLabel
+                             isMove:isMove
+                           destLister:dst];
             return;
         }
-        /* remote → local */
-        NSArray<NSString *> *names = [src selectedNames];
-        if (names.count == 0) {
-            [self showAlert:@"Copy" info:L(@"No items selected in source lister.") style:NSAlertStyleInformational];
+        /* remote → remote. If same server, rclone's moveto does it
+         * server-side (no round-trip via local disk). Different remotes
+         * means two transfers and isn't done yet. */
+        if ([src.remoteSpec isEqualToString:dst.remoteSpec]) {
+            [self remoteToRemoteNames:names fromLister:src toLister:dst isMove:isMove];
             return;
         }
-        [self remoteDownloadNames:names fromLister:src toLocalDir:dst.currentPath];
+        [self showAlert:isMove ? L(@"Move") : L(@"Copy")
+                   info:L(@"Copy between two different remotes isn't supported yet.")
+                  style:NSAlertStyleInformational];
         return;
     }
 
@@ -5816,6 +5943,161 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
 
 /* Stream selected items from a remote SOURCE Lister into a local directory
  * via rclone copy. Shows a row in the Jobs panel per run. */
+/* Upload one-or-more local files/folders into a remote directory via
+ * rclone copyto. Optional isMove = local delete after each successful
+ * upload (so net effect = move). Progress shown in the Jobs panel, same
+ * format as download. */
+- (void)remoteUploadPaths:(NSArray<NSString *> *)paths
+                    names:(NSArray<NSString *> *)names
+                 toRemote:(NSString *)spec
+             remoteDestDir:(NSString *)remoteDest
+                 remoteLbl:(NSString *)remoteLbl
+                    isMove:(BOOL)isMove
+               destLister:(ListerWindowController *)destLister {
+    ProgressSheetController *job = [[ProgressSheetController alloc] init];
+    job.titleLabel.stringValue = names.count == 1 ? names.firstObject
+        : [NSString stringWithFormat:L(@"%lu items to %@"),
+           (unsigned long)names.count, remoteLbl ?: @"remote"];
+    job.statsLabel.stringValue = L(@"Preparing…");
+    job.startTime = [NSDate date];
+    job.detailServer.stringValue = remoteLbl ?: @"—";
+    job.detailFrom.stringValue   = paths.count == 1 ? paths.firstObject
+        : [paths.firstObject stringByDeletingLastPathComponent];
+    job.detailTo.stringValue     = remoteDest ?: @"—";
+    [job.spinner startAnimation:nil];
+    [[JobsPanelController shared] addJobRow:job.rowView];
+
+    __weak ProgressSheetController *weakJob = job;
+    __block NSTimer *elapsedTimer = [NSTimer scheduledTimerWithTimeInterval:1.0
+        repeats:YES block:^(NSTimer *t) {
+        ProgressSheetController *j = weakJob;
+        if (!j) { [t invalidate]; return; }
+        [j updateElapsed];
+    }];
+
+    static NSRegularExpression *rxProgress = nil;
+    static dispatch_once_t onceTok; dispatch_once(&onceTok, ^{
+        rxProgress = [NSRegularExpression regularExpressionWithPattern:
+            @"Transferred:\\s+([\\d.]+\\s*\\S+)\\s*/\\s*([\\d.]+\\s*\\S+),\\s*(\\d+)%,?\\s*([\\d.]+\\s*\\S+/s)?(?:,\\s*ETA\\s+(\\S+))?"
+            options:0 error:nil];
+    });
+
+    __block NSUInteger remaining = paths.count;
+    __block BOOL anyFailed = NO;
+    NSUInteger i = 0;
+    NSUInteger total = paths.count;
+    NSMutableArray<NSTask *> *runningTasks = [NSMutableArray array];
+    job.cancelHandler = ^{
+        for (NSTask *t in [runningTasks copy]) {
+            if (t.isRunning) [t terminate];
+        }
+    };
+
+    for (NSString *path in paths) {
+        i++;
+        NSString *name = names[i - 1];
+        NSString *titleValue = total == 1 ? name
+            : [NSString stringWithFormat:@"(%lu/%lu) %@",
+               (unsigned long)i, (unsigned long)total, name];
+        job.titleLabel.stringValue = titleValue;
+        NSTask *task = [IDOpusRclone copyLocalPath:path
+                                           toRemote:spec
+                                           destPath:remoteDest
+                                           progress:^(NSString *line) {
+            NSTextCheckingResult *m = [rxProgress firstMatchInString:line
+                options:0 range:NSMakeRange(0, line.length)];
+            if (!m) return;
+            NSString *done  = [line substringWithRange:[m rangeAtIndex:1]];
+            NSString *tot   = [line substringWithRange:[m rangeAtIndex:2]];
+            NSString *pct   = [line substringWithRange:[m rangeAtIndex:3]];
+            NSString *speed = [m rangeAtIndex:4].location != NSNotFound
+                ? [line substringWithRange:[m rangeAtIndex:4]] : @"";
+            NSString *eta   = [m rangeAtIndex:5].location != NSNotFound
+                ? [line substringWithRange:[m rangeAtIndex:5]] : @"";
+
+            if (job.spinner.indeterminate) {
+                [job.spinner stopAnimation:nil];
+                job.spinner.indeterminate = NO;
+                job.spinner.minValue = 0; job.spinner.maxValue = 100;
+            }
+            job.spinner.doubleValue = pct.doubleValue;
+            NSMutableString *stats = [NSMutableString string];
+            [stats appendFormat:L(@"%@ of %@"), done, tot];
+            if (speed.length) [stats appendFormat:@" — %@", speed];
+            if (eta.length)   [stats appendFormat:@" — %@ %@", eta, L(@"remaining")];
+            job.statsLabel.stringValue = stats;
+            job.detailTransferred.stringValue = [NSString stringWithFormat:L(@"%@ of %@"), done, tot];
+            job.detailSpeed.stringValue       = speed.length ? speed : @"—";
+            job.detailRemaining.stringValue   = eta.length ? eta : @"—";
+        } completion:^(int status) {
+            if (status != 0) {
+                anyFailed = YES;
+            } else if (isMove) {
+                /* Only delete the local file if the upload succeeded. */
+                NSError *rmErr = nil;
+                if (![[NSFileManager defaultManager] removeItemAtPath:path error:&rmErr]) {
+                    anyFailed = YES;
+                }
+            }
+            if (--remaining == 0) {
+                [elapsedTimer invalidate];
+                [job.spinner stopAnimation:nil];
+                [[JobsPanelController shared] removeJobRow:job.rowView];
+                [destLister reloadBuffer];
+                if (anyFailed && !job.cancelled) {
+                    [self showAlert:isMove ? L(@"Move") : L(@"Copy")
+                               info:L(@"Some items could not be transferred.")
+                              style:NSAlertStyleWarning];
+                }
+            }
+        }];
+        if (task) [runningTasks addObject:task];
+    }
+}
+
+/* Remote → remote copy/move within the same rclone spec. Uses rclone moveto
+ * (for move) or copyto (for copy), both of which run server-side when the
+ * backend supports it, so no round-trip through local disk. */
+- (void)remoteToRemoteNames:(NSArray<NSString *> *)names
+                  fromLister:(ListerWindowController *)src
+                    toLister:(ListerWindowController *)dst
+                      isMove:(BOOL)isMove {
+    ProgressSheetController *job = [[ProgressSheetController alloc] init];
+    job.titleLabel.stringValue = names.count == 1 ? names.firstObject
+        : [NSString stringWithFormat:@"%lu → %@", (unsigned long)names.count, dst.remoteLabel ?: @""];
+    job.statsLabel.stringValue = isMove ? L(@"Moving…") : L(@"Copying…");
+    [[JobsPanelController shared] addJobRow:job.rowView];
+
+    __block NSUInteger remaining = names.count;
+    __block BOOL anyFailed = NO;
+    for (NSString *name in names) {
+        NSString *fromPath = [src.currentPath stringByAppendingPathComponent:name];
+        NSString *toPath   = [dst.currentPath stringByAppendingPathComponent:name];
+        if (isMove) {
+            [IDOpusRclone moveRemoteFrom:src.remoteSpec fromPath:fromPath toPath:toPath
+                               completion:^(int status, NSString *errOut) {
+                if (status != 0) anyFailed = YES;
+                if (--remaining == 0) {
+                    [[JobsPanelController shared] removeJobRow:job.rowView];
+                    [src reloadBuffer];
+                    [dst reloadBuffer];
+                    if (anyFailed) [self showAlert:L(@"Move") info:errOut ?: L(@"Some items could not be moved.") style:NSAlertStyleWarning];
+                }
+            }];
+        } else {
+            [IDOpusRclone copyRemoteFrom:src.remoteSpec fromPath:fromPath toPath:toPath
+                               completion:^(int status, NSString *errOut) {
+                if (status != 0) anyFailed = YES;
+                if (--remaining == 0) {
+                    [[JobsPanelController shared] removeJobRow:job.rowView];
+                    [dst reloadBuffer];
+                    if (anyFailed) [self showAlert:L(@"Copy") info:errOut ?: L(@"Some items could not be copied.") style:NSAlertStyleWarning];
+                }
+            }];
+        }
+    }
+}
+
 - (void)remoteDownloadNames:(NSArray<NSString *> *)names
                  fromLister:(ListerWindowController *)src
                  toLocalDir:(NSString *)destDir {
@@ -6398,6 +6680,121 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     NSError *launchErr = nil;
     if (![t launchAndReturnError:&launchErr]) { completion(-1); return nil; }
     return t;
+}
+
+/* Copy a single local file or directory into a remote directory. rclone's
+ * `copy SRC DEST` mirrors SRC's contents under DEST, so we target
+ * `DEST/<basename(SRC)>` to preserve the item name on the remote. */
++ (NSTask *)copyLocalPath:(NSString *)localPath
+                 toRemote:(NSString *)remoteSpec
+                 destPath:(NSString *)remoteDestDir
+                 progress:(void (^)(NSString *line))progress
+               completion:(void (^)(int status))completion {
+    NSString *name = [localPath lastPathComponent];
+    NSString *remoteDst = [[remoteSpec stringByAppendingString:remoteDestDir]
+                           stringByAppendingPathComponent:name];
+    NSUserDefaults *u = [NSUserDefaults standardUserDefaults];
+    NSInteger transfers = [u integerForKey:@"rcloneTransfers"];
+    if (transfers <= 0) transfers = 8;
+    NSInteger streams = [u integerForKey:@"rcloneMultiThreadStreams"];
+    if (streams <= 0) streams = 8;
+    /* copyto works for both files and directories and preserves the name. */
+    NSArray<NSString *> *args = @[@"copyto", localPath, remoteDst,
+                                   @"--progress", @"--stats=1s",
+                                   [NSString stringWithFormat:@"--transfers=%ld", (long)transfers],
+                                   [NSString stringWithFormat:@"--multi-thread-streams=%ld", (long)streams],
+                                   @"--multi-thread-cutoff=128M"];
+    NSTask *t = [self _taskWithArgs:args];
+    if (!t) { completion(-1); return nil; }
+    NSPipe *out = [NSPipe pipe];
+    NSPipe *err = [NSPipe pipe];
+    t.standardOutput = out;
+    t.standardError = err;
+    __block NSMutableString *buf = [NSMutableString string];
+    void (^drain)(NSFileHandle *) = ^(NSFileHandle *fh) {
+        NSData *d = fh.availableData;
+        if (!d.length) { fh.readabilityHandler = nil; return; }
+        NSString *s = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+        if (!s.length) return;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [buf appendString:s];
+            while (YES) {
+                NSRange r = [buf rangeOfString:@"\n"];
+                if (r.location == NSNotFound) break;
+                NSString *line = [buf substringToIndex:r.location];
+                [buf deleteCharactersInRange:NSMakeRange(0, r.location + 1)];
+                if (progress && line.length) progress(line);
+            }
+        });
+    };
+    out.fileHandleForReading.readabilityHandler = drain;
+    err.fileHandleForReading.readabilityHandler = drain;
+    t.terminationHandler = ^(NSTask *task) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            completion(task.terminationStatus);
+        });
+    };
+    NSError *launchErr = nil;
+    if (![t launchAndReturnError:&launchErr]) { completion(-1); return nil; }
+    return t;
+}
+
+/* Helper: run a one-shot rclone verb (mkdir / deletefile / purge / moveto)
+ * and deliver status + captured stderr on the main queue. */
++ (void)_runSimpleArgs:(NSArray<NSString *> *)args
+             completion:(void (^)(int status, NSString *errOut))completion {
+    NSTask *t = [self _taskWithArgs:args];
+    if (!t) { completion(-1, @"rclone binary not found"); return; }
+    NSPipe *err = [NSPipe pipe];
+    t.standardOutput = [NSPipe pipe];
+    t.standardError = err;
+    t.terminationHandler = ^(NSTask *task) {
+        NSData *d = [err.fileHandleForReading readDataToEndOfFile];
+        NSString *s = [[[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding]
+            stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            completion(task.terminationStatus, s);
+        });
+    };
+    NSError *launchErr = nil;
+    if (![t launchAndReturnError:&launchErr]) completion(-1, launchErr.localizedDescription);
+}
+
++ (void)makeRemoteDir:(NSString *)remoteSpec
+                 path:(NSString *)remotePath
+           completion:(void (^)(int status, NSString *errOut))completion {
+    NSString *target = [NSString stringWithFormat:@"%@%@", remoteSpec, remotePath];
+    [self _runSimpleArgs:@[@"mkdir", target] completion:completion];
+}
+
++ (void)deleteRemotePath:(NSString *)remoteSpec
+                    path:(NSString *)remotePath
+                   isDir:(BOOL)isDir
+              completion:(void (^)(int status, NSString *errOut))completion {
+    NSString *target = [NSString stringWithFormat:@"%@%@", remoteSpec, remotePath];
+    /* purge removes the directory AND its contents; deletefile takes out one
+     * regular file. Matches the semantics the Lister UI expects when the
+     * user hits Delete on a mixed selection. */
+    NSString *verb = isDir ? @"purge" : @"deletefile";
+    [self _runSimpleArgs:@[verb, target] completion:completion];
+}
+
++ (void)moveRemoteFrom:(NSString *)remoteSpec
+               fromPath:(NSString *)fromPath
+                 toPath:(NSString *)toPath
+             completion:(void (^)(int status, NSString *errOut))completion {
+    NSString *src = [NSString stringWithFormat:@"%@%@", remoteSpec, fromPath];
+    NSString *dst = [NSString stringWithFormat:@"%@%@", remoteSpec, toPath];
+    [self _runSimpleArgs:@[@"moveto", src, dst] completion:completion];
+}
+
++ (void)copyRemoteFrom:(NSString *)remoteSpec
+               fromPath:(NSString *)fromPath
+                 toPath:(NSString *)toPath
+             completion:(void (^)(int status, NSString *errOut))completion {
+    NSString *src = [NSString stringWithFormat:@"%@%@", remoteSpec, fromPath];
+    NSString *dst = [NSString stringWithFormat:@"%@%@", remoteSpec, toPath];
+    [self _runSimpleArgs:@[@"copyto", src, dst] completion:completion];
 }
 
 @end
