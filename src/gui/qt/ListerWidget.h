@@ -28,7 +28,9 @@ public slots:
     void selectAll();
     void selectNone();
     void setActive(bool active);
-    void applyFilter(const QString &showPattern);
+    void setShowPattern(const QString &pattern);
+    void setHideDotfiles(bool hide);
+    void toggleHideDotfiles();
 
 signals:
     void pathChanged(const QString &newPath);
@@ -68,4 +70,8 @@ private:
     QLabel         *m_statusLabel = nullptr;
     bool            m_active      = false;
     QString         m_path;
+    QString         m_showPattern;
+    bool            m_hideDotfiles = false;
+
+    void reapplyFilter();
 };

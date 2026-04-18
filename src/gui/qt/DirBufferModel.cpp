@@ -1,8 +1,12 @@
 #include "DirBufferModel.h"
 
+#include <QFileInfo>
+#include <cstring>
+
 extern "C" {
 #include "core/dir_buffer.h"
 #include "core/dir_entry.h"
+#include "pal/pal_file.h"
 #include "pal/pal_strings.h"
 }
 
@@ -29,6 +33,32 @@ QVariant DirBufferModel::data(const QModelIndex &index, int role) const {
     if (role == Qt::TextAlignmentRole && index.column() == ColSize) {
         return int(Qt::AlignRight | Qt::AlignVCenter);
     }
+
+    if (role == Qt::DecorationRole && index.column() == ColName) {
+        dir_entry_t *e = dir_buffer_get_entry(m_buf, index.row());
+        if (!e) return {};
+        if (dir_entry_is_dir(e)) {
+            if (m_folderIcon.isNull())
+                m_folderIcon = m_iconProvider.icon(QFileIconProvider::Folder);
+            return m_folderIcon;
+        }
+        const char *dot = std::strrchr(e->name, '.');
+        QString key = dot ? QString::fromUtf8(dot).toLower()
+                          : QStringLiteral("<none>");
+        auto it = m_iconCache.constFind(key);
+        if (it != m_iconCache.constEnd()) return it.value();
+        char full[4096];
+        pal_path_join(m_buf->path, e->name, full, sizeof full);
+        QIcon icon = m_iconProvider.icon(QFileInfo(QString::fromUtf8(full)));
+        if (icon.isNull()) {
+            if (m_fileIcon.isNull())
+                m_fileIcon = m_iconProvider.icon(QFileIconProvider::File);
+            icon = m_fileIcon;
+        }
+        m_iconCache.insert(key, icon);
+        return icon;
+    }
+
     if (role != Qt::DisplayRole) return {};
 
     dir_entry_t *e = dir_buffer_get_entry(m_buf, index.row());

@@ -8,7 +8,9 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QInputDialog>
+#include <QKeySequence>
 #include <QMessageBox>
+#include <QShortcut>
 #include <QSplitter>
 
 static bool copyRecursive(const QString &src, const QString &dst) {
@@ -81,6 +83,23 @@ MainWindow::MainWindow(const QString &leftPath, const QString &rightPath,
 
     connect(qApp, &QApplication::focusChanged,
             this, &MainWindow::onFocusChanged);
+
+    /* Keyboard shortcuts — target the active pane */
+    auto addSC = [this](const QKeySequence &seq, auto handler) {
+        auto *sc = new QShortcut(seq, this);
+        sc->setContext(Qt::WindowShortcut);
+        connect(sc, &QShortcut::activated, this, handler);
+    };
+    addSC(QKeySequence(Qt::Key_F3), [this]{ if (m_active) doRename(m_active);  });
+    addSC(QKeySequence(Qt::Key_F5), [this]{ if (m_active) doCopy(m_active);    });
+    addSC(QKeySequence(Qt::Key_F6), [this]{ if (m_active) doMove(m_active);    });
+    addSC(QKeySequence(Qt::Key_F7), [this]{ if (m_active) doMakeDir(m_active); });
+    addSC(QKeySequence(Qt::Key_F8), [this]{ if (m_active) doDelete(m_active);  });
+    addSC(QKeySequence(Qt::Key_F9), [this]{ if (m_active) doInfo(m_active);    });
+    addSC(QKeySequence(QStringLiteral("Ctrl+.")),
+          [this]{ if (m_active) m_active->toggleHideDotfiles(); });
+    addSC(QKeySequence(QStringLiteral("Ctrl+H")),
+          [this]{ if (m_active) m_active->toggleHideDotfiles(); });
 
     setActive(m_left);
 }
@@ -287,5 +306,5 @@ void MainWindow::doFilter(ListerWidget *src) {
         tr("Show pattern (glob, e.g. *.txt — empty clears filter):"),
         QLineEdit::Normal, QString(), &ok);
     if (!ok) return;
-    src->applyFilter(pattern);
+    src->setShowPattern(pattern);
 }

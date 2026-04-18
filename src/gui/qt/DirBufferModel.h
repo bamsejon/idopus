@@ -1,6 +1,9 @@
 #pragma once
 
 #include <QAbstractTableModel>
+#include <QFileIconProvider>
+#include <QHash>
+#include <QIcon>
 #include <QString>
 
 struct dir_buffer;
@@ -35,4 +38,8 @@ public:
 
 private:
     struct dir_buffer *m_buf = nullptr;
+    QFileIconProvider m_iconProvider;
+    mutable QHash<QString, QIcon> m_iconCache;
+    mutable QIcon m_folderIcon;
+    mutable QIcon m_fileIcon;
 };

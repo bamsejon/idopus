@@ -223,8 +223,23 @@ QStringList ListerWidget::selectedPaths() const {
     return out;
 }
 
-void ListerWidget::applyFilter(const QString &showPattern) {
-    m_model->setFilter(showPattern, QString(), false);
+void ListerWidget::setShowPattern(const QString &pattern) {
+    m_showPattern = pattern;
+    reapplyFilter();
+}
+
+void ListerWidget::setHideDotfiles(bool hide) {
+    if (m_hideDotfiles == hide) return;
+    m_hideDotfiles = hide;
+    reapplyFilter();
+}
+
+void ListerWidget::toggleHideDotfiles() {
+    setHideDotfiles(!m_hideDotfiles);
+}
+
+void ListerWidget::reapplyFilter() {
+    m_model->setFilter(m_showPattern, QString(), m_hideDotfiles);
     updateStatus();
 }
 
