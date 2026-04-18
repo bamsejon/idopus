@@ -43,6 +43,23 @@ typedef NS_ENUM(NSInteger, ListerState) {
 @class PreferencesWindowController;
 @class IDOpusAppDelegate;
 
+/* Forward interface for the rclone helper — implementation lives at the
+ * bottom of the file. Listed here so ListerWindowController (defined above
+ * the implementation) can call it during remote load. */
+@interface IDOpusRclone : NSObject
++ (NSString *)binaryPath;
++ (void)obscurePassword:(NSString *)plaintext
+             completion:(void (^)(NSString *obscured, NSError *err))completion;
++ (void)listRemote:(NSString *)remoteSpec
+              path:(NSString *)remotePath
+        completion:(void (^)(NSArray<NSDictionary *> *entries, NSError *err))completion;
++ (NSTask *)copyFromRemote:(NSString *)remoteSpec
+                remotePath:(NSString *)remotePath
+                   toLocal:(NSString *)localDir
+                  progress:(void (^)(NSString *line))progress
+                completion:(void (^)(int status))completion;
+@end
+
 /* Forward-declared remote UI classes — full implementations near the bottom
  * of the file. The @interface is declared here (not @class) so the AppDelegate
  * can read the `.window` property from NSWindowController. */
@@ -332,6 +349,13 @@ typedef NS_ENUM(NSInteger, ListerState) {
 @property (nonatomic, strong) NSLayoutConstraint *findHeightConstraint;
 @property (nonatomic, assign) FSEventStreamRef fsStream;
 @property (nonatomic, strong) NSTextField *emptyStateLabel;
+/* Remote mode: when set, the Lister's buffer is populated from rclone lsjson
+ * instead of the local filesystem. currentPath is the remote path (not a
+ * local one). FSEvents is skipped; pal_file operations are bypassed. */
+@property (nonatomic, copy) NSString *remoteSpec;
+@property (nonatomic, copy) NSString *remoteLabel;
+- (void)loadRemotePath:(NSString *)path;
+- (BOOL)isRemote;
 - (void)setState:(ListerState)state;
 - (void)goBack:(id)sender;
 - (void)goForward:(id)sender;
@@ -1057,7 +1081,10 @@ typedef NS_ENUM(NSInteger, ListerState) {
     };
 }
 
+- (BOOL)isRemote { return _remoteSpec.length > 0; }
+
 - (void)loadPath:(NSString *)path {
+    if (self.isRemote) { [self loadRemotePath:path]; return; }
     _currentPath = path;
     _pathField.stringValue = path;
     _pathControl.URL = [NSURL fileURLWithPath:path];
@@ -1079,6 +1106,83 @@ typedef NS_ENUM(NSInteger, ListerState) {
     }
     [self updateHistoryButtons];
     [self startWatchingPath:path];
+}
+
+/* Load a remote path via rclone lsjson. Populates the dataSource buffer with
+ * synthetic dir_entry_t records so the existing rendering / selection / sort
+ * pipeline works unchanged. FSEvents and pal_file are bypassed. */
+- (void)loadRemotePath:(NSString *)path {
+    if (!path.length) path = @"/";
+    _currentPath = path;
+    _pathField.stringValue = path;
+    self.window.title = [NSString stringWithFormat:@"%@ — %@", _remoteLabel ?: @"remote", path];
+    /* NSPathControl expects a file URL; fake it from the remote path so the
+     * breadcrumb at least renders segments. Clicking a segment navigates via
+     * pathControlAction: which re-enters loadPath — correct for remote too. */
+    _pathControl.URL = [NSURL fileURLWithPath:path];
+    [self updateStatusBar];
+
+    if (!_history) _history = [NSMutableArray array];
+    if (!_navigatingInHistory) {
+        if (_historyIndex < (NSInteger)_history.count - 1) {
+            [_history removeObjectsInRange:NSMakeRange(_historyIndex + 1, _history.count - _historyIndex - 1)];
+        }
+        if (_history.count == 0 || ![_history.lastObject isEqualToString:path]) {
+            [_history addObject:path];
+            _historyIndex = (NSInteger)_history.count - 1;
+        }
+    }
+    [self updateHistoryButtons];
+    [self stopWatching];   /* no FSEvents on remote */
+
+    __weak typeof(self) weakSelf = self;
+    [IDOpusRclone listRemote:_remoteSpec path:path completion:^(NSArray<NSDictionary *> *entries, NSError *err) {
+        typeof(self) s = weakSelf; if (!s) return;
+        dir_buffer_t *buf = s->_dataSource.buffer;
+        if (!buf) return;
+        if (err) {
+            [s->_appDelegate showAlert:@"Remote"
+                                   info:err.localizedDescription ?: @"listing failed"
+                                  style:NSAlertStyleWarning];
+            return;
+        }
+        dir_buffer_clear(buf);
+        strncpy(buf->path, path.UTF8String, sizeof(buf->path) - 1);
+        buf->path[sizeof(buf->path) - 1] = 0;
+        buf->flags |= DBUF_VALID;
+        buf->disk_free = 0;
+        buf->disk_total = 0;
+
+        NSISO8601DateFormatter *fmt = [[NSISO8601DateFormatter alloc] init];
+        fmt.formatOptions = NSISO8601DateFormatWithInternetDateTime |
+                             NSISO8601DateFormatWithFractionalSeconds;
+        for (NSDictionary *e in entries) {
+            NSString *name = e[@"Name"];
+            if (!name.length) continue;
+            uint64_t size = [e[@"Size"] unsignedLongLongValue];
+            BOOL isDir = [e[@"IsDir"] boolValue];
+            NSDate *date = nil;
+            if ([e[@"ModTime"] isKindOfClass:[NSString class]]) {
+                date = [fmt dateFromString:e[@"ModTime"]];
+                if (!date) {
+                    /* rclone sometimes emits without fractional seconds */
+                    NSISO8601DateFormatter *plain = [[NSISO8601DateFormatter alloc] init];
+                    plain.formatOptions = NSISO8601DateFormatWithInternetDateTime;
+                    date = [plain dateFromString:e[@"ModTime"]];
+                }
+            }
+            time_t mtime = date ? (time_t)date.timeIntervalSince1970 : 0;
+            dir_entry_t *de = dir_entry_create(name.UTF8String, size,
+                                                isDir ? ENTRY_DIRECTORY : ENTRY_FILE,
+                                                mtime, isDir ? 0755 : 0644);
+            if (de) dir_buffer_add_entry(buf, de);
+        }
+        dir_buffer_apply_filter(buf);
+        dir_buffer_sort(buf);
+        dir_buffer_update_stats(buf);
+        [s->_dataSource.tableView reloadData];
+        [s updateStatusBar];
+    }];
 }
 
 #pragma mark FSEvents auto-refresh
@@ -1233,6 +1337,13 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
 #pragma mark Actions
 
 - (void)goUp:(id)sender {
+    if (self.isRemote) {
+        if ([_currentPath isEqualToString:@"/"] || _currentPath.length == 0) return;
+        NSString *parent = [_currentPath stringByDeletingLastPathComponent];
+        if (parent.length == 0) parent = @"/";
+        [self loadPath:parent];
+        return;
+    }
     char parent[4096];
     pal_path_parent([_currentPath fileSystemRepresentation], parent, sizeof(parent));
     [self loadPath:[NSString stringWithUTF8String:parent]];
@@ -1243,6 +1354,7 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
 }
 
 - (void)goRoot:(id)sender {
+    if (self.isRemote) { [self loadPath:@"/"]; return; }
     /* Volume root — walk parents until parent == self (fs root) */
     NSString *p = _currentPath;
     while (YES) {
@@ -1271,6 +1383,17 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
 
     dir_entry_t *entry = dir_buffer_get_entry(_dataSource.buffer, (int)row);
     if (!entry) return;
+
+    if (self.isRemote) {
+        /* Remote: only navigation into directories for now. Opening remote
+         * files would require downloading to a temp path; deferred to v1.7. */
+        if (dir_entry_is_dir(entry)) {
+            NSString *next = [_currentPath stringByAppendingPathComponent:
+                               [NSString stringWithUTF8String:entry->name]];
+            [self loadPath:next];
+        }
+        return;
+    }
     char fullpath[4096];
     pal_path_join([_currentPath fileSystemRepresentation],
                   entry->name, fullpath, sizeof(fullpath));
@@ -1921,6 +2044,13 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
      * user's marked items in the middle of an interaction. */
     NSArray<NSString *> *selectedNames = [self selectedNames];
 
+    if (self.isRemote) {
+        /* Re-fetch via rclone; selection restoration still works because the
+         * completion handler runs asynchronously but the selection indexes
+         * apply after reloadData (which happens inside loadRemotePath). */
+        [self loadRemotePath:_currentPath];
+        return;
+    }
     [_dataSource loadPath:_currentPath];
 
     if (selectedNames.count > 0 && _dataSource.buffer) {
@@ -5150,6 +5280,40 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
                   style:NSAlertStyleInformational];
         return;
     }
+
+    /* Remote-aware routing. The existing pal_file / NSFileManager pipeline
+     * only works on local paths, so any operation where either side is
+     * remote has to go through rclone. v1.6 ships remote→local only;
+     * remote→remote and local→remote land in v1.7. */
+    if (src.isRemote || dst.isRemote) {
+        if (isMove) {
+            [self showAlert:@"Move"
+                       info:L(@"Move to/from remote servers arrives in v1.7. Use Copy for now, then remove the remote file manually.")
+                      style:NSAlertStyleInformational];
+            return;
+        }
+        if (src.isRemote && dst.isRemote) {
+            [self showAlert:@"Copy"
+                       info:L(@"Remote-to-remote copy arrives in v1.7.")
+                      style:NSAlertStyleInformational];
+            return;
+        }
+        if (!src.isRemote && dst.isRemote) {
+            [self showAlert:@"Copy"
+                       info:L(@"Upload from local to remote arrives in v1.7. Download (remote → local) works today.")
+                      style:NSAlertStyleInformational];
+            return;
+        }
+        /* remote → local */
+        NSArray<NSString *> *names = [src selectedNames];
+        if (names.count == 0) {
+            [self showAlert:@"Copy" info:L(@"No items selected in source lister.") style:NSAlertStyleInformational];
+            return;
+        }
+        [self remoteDownloadNames:names fromLister:src toLocalDir:dst.currentPath];
+        return;
+    }
+
     if ([src.currentPath isEqualToString:dst.currentPath]) {
         [self showAlert:isMove ? @"Move" : @"Copy"
                    info:@"Source and destination are the same directory."
@@ -5188,6 +5352,47 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
         }
         keepAlive = nil;
     }];
+}
+
+/* Stream selected items from a remote SOURCE Lister into a local directory
+ * via rclone copy. Shows a row in the Jobs panel per run. */
+- (void)remoteDownloadNames:(NSArray<NSString *> *)names
+                 fromLister:(ListerWindowController *)src
+                 toLocalDir:(NSString *)destDir {
+    ProgressSheetController *job = [[ProgressSheetController alloc] init];
+    job.titleLabel.stringValue = [NSString stringWithFormat:L(@"Downloading from %@"),
+                                    src.remoteLabel ?: @"remote"];
+    [job.spinner startAnimation:nil];
+    [[JobsPanelController shared] addJobRow:job.rowView];
+
+    __block NSUInteger remaining = names.count;
+    __block BOOL anyFailed = NO;
+    NSUInteger total = names.count;
+    NSUInteger i = 0;
+    for (NSString *name in names) {
+        i++;
+        NSString *remotePath = [src.currentPath stringByAppendingPathComponent:name];
+        job.fileLabel.stringValue = [NSString stringWithFormat:@"(%lu/%lu) %@",
+                                       (unsigned long)i, (unsigned long)total, name];
+        [IDOpusRclone copyFromRemote:src.remoteSpec
+                          remotePath:remotePath
+                             toLocal:destDir
+                            progress:^(NSString *line) {
+            job.fileLabel.stringValue = line;
+        } completion:^(int status) {
+            if (status != 0) anyFailed = YES;
+            if (--remaining == 0) {
+                [job.spinner stopAnimation:nil];
+                [[JobsPanelController shared] removeJobRow:job.rowView];
+                [self refreshAllListersShowing:destDir];
+                if (anyFailed) {
+                    [self showAlert:L(@"Download")
+                               info:L(@"Some items could not be downloaded.")
+                              style:NSAlertStyleWarning];
+                }
+            }
+        }];
+    }
 }
 
 #pragma mark Contextual enablement
@@ -5269,16 +5474,19 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
 }
 
 - (void)connectToServerAction:(id)sender {
-    if (!_remoteBrowsers) _remoteBrowsers = [NSMutableArray array];
     _connectDialog = [[ConnectDialogController alloc] init];
     __weak typeof(self) weakSelf = self;
     _connectDialog.onConnect = ^(NSString *name, NSString *spec, NSString *path) {
         typeof(self) s = weakSelf; if (!s) return;
-        RemoteBrowserWindowController *browser = [[RemoteBrowserWindowController alloc]
-            initWithDisplayName:name spec:spec path:path appDelegate:s];
-        [s.remoteBrowsers addObject:browser];
-        [browser.window center];
-        [browser.window makeKeyAndOrderFront:nil];
+        /* Open the remote as a real Lister so it participates in SOURCE/DEST
+         * semantics. Window geometry clones the active Lister if any. */
+        NSRect frame = s.activeSource.window.frame;
+        if (frame.size.width < 400) frame = NSMakeRect(100, 100, 800, 600);
+        ListerWindowController *lister = [s newListerWindow:path frame:frame];
+        lister.remoteSpec = spec;
+        lister.remoteLabel = name;
+        [lister loadRemotePath:path];
+        [lister.window makeKeyAndOrderFront:nil];
     };
     NSWindow *parent = [NSApp keyWindow] ?: _activeSource.window;
     if (parent) {
@@ -5301,21 +5509,8 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
  * Remotes are expressed as *inline* rclone specs so we don't have to persist
  * credentials to rclone.conf. Example for SFTP:
  *   :sftp,host=192.168.4.10,user=jon,pass=<obscured>:/path
- * The password must be passed through `rclone obscure` first — rclone won't
- * accept a clear-text pass in the inline spec. */
-@interface IDOpusRclone : NSObject
-+ (NSString *)binaryPath;
-+ (void)obscurePassword:(NSString *)plaintext
-             completion:(void (^)(NSString *obscured, NSError *err))completion;
-+ (void)listRemote:(NSString *)remoteSpec
-              path:(NSString *)remotePath
-        completion:(void (^)(NSArray<NSDictionary *> *entries, NSError *err))completion;
-+ (NSTask *)copyFromRemote:(NSString *)remoteSpec
-                remotePath:(NSString *)remotePath
-                   toLocal:(NSString *)localDir
-                  progress:(void (^)(NSString *line))progress
-                completion:(void (^)(int status))completion;
-@end
+ * Password is passed through `rclone obscure` first.
+ * (Class interface declared at the top of the file as a forward declaration.) */
 
 @implementation IDOpusRclone
 
