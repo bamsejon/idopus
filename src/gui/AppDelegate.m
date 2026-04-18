@@ -95,6 +95,8 @@ typedef NS_ENUM(NSInteger, ListerState) {
 - (void)listerDidMove:(ListerWindowController *)lw;
 - (void)enforceBankBetweenListers;
 - (void)snapshotListerFrames;
+- (void)snapDestToBankRightEdge;
+- (void)zoomToTileWorkspace;
 - (void)showAlert:(NSString *)title info:(NSString *)info style:(NSAlertStyle)style;
 - (void)performDropOntoLister:(ListerWindowController *)dest
                      fromURLs:(NSArray<NSURL *> *)urls
@@ -1984,6 +1986,16 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     [_appDelegate enforceBankBetweenListers];
 }
 
+/* Intercept the standard zoom (green traffic-light button + "Zoom" menu
+ * item). We don't want this single Lister to fill the screen on top of the
+ * others — that looks chaotic. Instead, tile the whole workspace so all
+ * three windows share the screen. Returning NO here cancels AppKit's own
+ * zoom behaviour. */
+- (BOOL)windowShouldZoom:(NSWindow *)window toFrame:(NSRect)newFrame {
+    [_appDelegate zoomToTileWorkspace];
+    return NO;
+}
+
 - (void)windowWillClose:(NSNotification *)notification {
     [_appDelegate listerClosing:self];
 }
@@ -2495,7 +2507,7 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
  * all Listers. Non-activating: clicking a button does NOT steal key focus from
  * the active source Lister, so source/dest semantics remain stable.
  * Buttons route to IDOpusAppDelegate methods that operate on activeSource. */
-@interface ButtonBankPanelController : NSWindowController
+@interface ButtonBankPanelController : NSWindowController <NSWindowDelegate>
 - (instancetype)initWithAppDelegate:(IDOpusAppDelegate *)appDelegate;
 - (void)positionBetweenLeftFrame:(NSRect)leftFrame rightFrame:(NSRect)rightFrame;
 - (void)rebuildGrid;
@@ -2508,27 +2520,48 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
 
 - (instancetype)initWithAppDelegate:(IDOpusAppDelegate *)appDelegate {
     NSRect frame = NSMakeRect(0, 0, 108, 400);
-    NSWindowStyleMask style = NSWindowStyleMaskTitled |
-                               NSWindowStyleMaskClosable |
+    /* Borderless + resizable: no title bar / close / min / zoom buttons, so
+     * the user can't accidentally drag the bank out of the tile. Height is
+     * enforced to match the neighbouring Listers in windowWillResize; only
+     * horizontal resize is allowed (drag the right edge to widen/narrow). */
+    NSWindowStyleMask style = NSWindowStyleMaskBorderless |
                                NSWindowStyleMaskResizable |
                                NSWindowStyleMaskNonactivatingPanel;
     NSPanel *panel = [[NSPanel alloc] initWithContentRect:frame
                                                 styleMask:style
                                                   backing:NSBackingStoreBuffered
                                                     defer:NO];
-    panel.title = @"Buttons";
     /* Attached to the SOURCE Lister as a child window — no floating/level tricks.
      * Non-activating so clicking a button doesn't steal focus from the Lister. */
     panel.becomesKeyOnlyIfNeeded = YES;
     panel.hidesOnDeactivate = NO;
+    panel.movable = NO;   /* lock position — managed by app delegate's tile snap */
     panel.contentMinSize = NSMakeSize(70, 200);
 
     self = [super initWithWindow:panel];
     if (!self) return nil;
     _appDelegate = appDelegate;
+    panel.delegate = self;
 
     [self buildGrid];
     return self;
+}
+
+#pragma mark NSWindowDelegate
+
+/* Enforce "only horizontal resize". The height is locked to whatever the
+ * adjacent Listers have; the user controls width by dragging the panel's
+ * right edge. */
+- (NSSize)windowWillResize:(NSWindow *)sender toSize:(NSSize)proposedSize {
+    NSSize s = proposedSize;
+    s.height = sender.frame.size.height;
+    return s;
+}
+
+/* After a bank resize (user dragged the right edge), snap the DEST Lister
+ * to the bank's new right edge so the tile stays tight. */
+- (void)windowDidResize:(NSNotification *)note {
+    [_appDelegate snapDestToBankRightEdge];
 }
 
 - (void)buildGrid {
@@ -5501,6 +5534,63 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
         _lastListerFrames[[NSValue valueWithNonretainedObject:l.window]] =
             [NSValue valueWithRect:l.window.frame];
     }
+}
+
+/* Called by Button Bank's windowDidResize: keep the right-hand Lister flush
+ * against the bank's new right edge. No-op for non-two-pane setups. */
+- (void)snapDestToBankRightEdge {
+    if (!_buttonBankPanel) return;
+    NSMutableArray<ListerWindowController *> *visible = [NSMutableArray array];
+    for (ListerWindowController *l in _listerControllers) {
+        if (l.window.isVisible && !l.window.isMiniaturized) [visible addObject:l];
+    }
+    if (visible.count != 2) return;
+    ListerWindowController *left = visible[0], *right = visible[1];
+    if (left.window.frame.origin.x > right.window.frame.origin.x) {
+        ListerWindowController *t = left; left = right; right = t;
+    }
+    NSRect bank = _buttonBankPanel.window.frame;
+    NSPoint newOrigin = NSMakePoint(NSMaxX(bank), right.window.frame.origin.y);
+    if (fabs(newOrigin.x - right.window.frame.origin.x) < 0.5) return;
+    _suppressSnap = YES;
+    [right.window setFrameOrigin:newOrigin];
+    NSRect f = right.window.frame;
+    _lastListerFrames[[NSValue valueWithNonretainedObject:right.window]] =
+        [NSValue valueWithRect:f];
+    _suppressSnap = NO;
+}
+
+/* Tile the three workspace windows across the full usable screen: Listers
+ * split the horizontal space evenly, bank keeps its current width, all three
+ * share the screen's full height. Invoked when the user clicks any Lister's
+ * green zoom button — the idea is "make the workspace fill the screen", not
+ * "maximise this one window on top of the others". */
+- (void)zoomToTileWorkspace {
+    if (!_buttonBankPanel) return;
+    NSMutableArray<ListerWindowController *> *visible = [NSMutableArray array];
+    for (ListerWindowController *l in _listerControllers) {
+        if (l.window.isVisible && !l.window.isMiniaturized) [visible addObject:l];
+    }
+    if (visible.count != 2) return;
+    ListerWindowController *left = visible[0], *right = visible[1];
+    if (left.window.frame.origin.x > right.window.frame.origin.x) {
+        ListerWindowController *t = left; left = right; right = t;
+    }
+    NSScreen *screen = left.window.screen ?: [NSScreen mainScreen];
+    NSRect vis = screen.visibleFrame;
+    CGFloat bankW = MAX(80, _buttonBankPanel.window.frame.size.width);
+    CGFloat listerW = floor((vis.size.width - bankW) / 2);
+
+    _suppressSnap = YES;
+    NSRect lf = NSMakeRect(vis.origin.x, vis.origin.y, listerW, vis.size.height);
+    NSRect bf = NSMakeRect(NSMaxX(lf), vis.origin.y, bankW, vis.size.height);
+    NSRect rf = NSMakeRect(NSMaxX(bf), vis.origin.y,
+                            vis.size.width - listerW - bankW, vis.size.height);
+    [left.window setFrame:lf display:YES animate:YES];
+    [right.window setFrame:rf display:YES animate:YES];
+    [_buttonBankPanel.window setFrame:bf display:YES animate:NO];
+    _suppressSnap = NO;
+    [self snapshotListerFrames];
 }
 
 - (void)listerDidMove:(ListerWindowController *)lw {
