@@ -2223,11 +2223,24 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
  * NSTextView. Cancel terminates the task. The user sees exactly the
  * rsync log they'd see in a terminal. */
 @interface RsyncSheetController : NSWindowController
+@property (nonatomic, strong) NSTextField *currentFileLabel;
+@property (nonatomic, strong) NSTextField *statusLabel;
+@property (nonatomic, strong) NSProgressIndicator *progressBar;
 @property (nonatomic, strong) NSTextView *textView;
+@property (nonatomic, strong) NSView *summaryView;
 @property (nonatomic, strong) NSButton *cancelButton;
 @property (nonatomic, strong) NSButton *closeButton;
+@property (nonatomic, strong) NSButton *toggleLogButton;
+@property (nonatomic, strong) NSScrollView *logScrollView;
 @property (nonatomic, strong) NSTask *task;
 @property (atomic, assign) BOOL finished;
+/* parser state */
+@property (nonatomic, strong) NSMutableString *lineBuf;
+@property (nonatomic, strong) NSString *pendingFilename;
+@property (nonatomic, strong) NSMutableString *statsBuf;
+@property (atomic, assign) BOOL inStatsBlock;
+@property (atomic, assign) double totalFiles;
+@property (atomic, assign) double filesDone;
 
 - (void)runArgs:(NSArray<NSString *> *)args
           title:(NSString *)title
@@ -2238,7 +2251,7 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
 @implementation RsyncSheetController
 
 - (instancetype)init {
-    NSRect frame = NSMakeRect(0, 0, 640, 420);
+    NSRect frame = NSMakeRect(0, 0, 680, 460);
     NSWindow *w = [[NSWindow alloc] initWithContentRect:frame
                                               styleMask:(NSWindowStyleMaskTitled |
                                                          NSWindowStyleMaskResizable)
@@ -2246,13 +2259,39 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
                                                   defer:NO];
     self = [super initWithWindow:w];
     if (!self) return nil;
+    _lineBuf = [NSMutableString string];
+    _statsBuf = [NSMutableString string];
 
     NSView *c = w.contentView;
 
-    NSScrollView *sv = [[NSScrollView alloc] init];
-    sv.hasVerticalScroller = YES;
-    sv.autohidesScrollers = NO;
-    sv.translatesAutoresizingMaskIntoConstraints = NO;
+    _currentFileLabel = [NSTextField labelWithString:L(@"Preparing…")];
+    _currentFileLabel.font = [NSFont systemFontOfSize:12 weight:NSFontWeightMedium];
+    _currentFileLabel.textColor = [NSColor labelColor];
+    _currentFileLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    _currentFileLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [c addSubview:_currentFileLabel];
+
+    _statusLabel = [NSTextField labelWithString:@""];
+    _statusLabel.font = [NSFont monospacedDigitSystemFontOfSize:11 weight:NSFontWeightRegular];
+    _statusLabel.textColor = [NSColor secondaryLabelColor];
+    _statusLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [c addSubview:_statusLabel];
+
+    _progressBar = [[NSProgressIndicator alloc] init];
+    _progressBar.indeterminate = YES;
+    _progressBar.style = NSProgressIndicatorStyleBar;
+    _progressBar.minValue = 0.0;
+    _progressBar.maxValue = 1.0;
+    _progressBar.translatesAutoresizingMaskIntoConstraints = NO;
+    [_progressBar startAnimation:nil];
+    [c addSubview:_progressBar];
+
+    _logScrollView = [[NSScrollView alloc] init];
+    _logScrollView.hasVerticalScroller = YES;
+    _logScrollView.autohidesScrollers = NO;
+    _logScrollView.borderType = NSBezelBorder;
+    _logScrollView.translatesAutoresizingMaskIntoConstraints = NO;
+    _logScrollView.hidden = YES;
 
     _textView = [[NSTextView alloc] init];
     _textView.font = [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightRegular];
@@ -2262,8 +2301,21 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     _textView.backgroundColor = [NSColor textBackgroundColor];
     _textView.autoresizingMask = NSViewWidthSizable;
     _textView.textContainer.widthTracksTextView = YES;
-    sv.documentView = _textView;
-    [c addSubview:sv];
+    _logScrollView.documentView = _textView;
+    [c addSubview:_logScrollView];
+
+    _summaryView = [[NSView alloc] init];
+    _summaryView.translatesAutoresizingMaskIntoConstraints = NO;
+    _summaryView.wantsLayer = YES;
+    _summaryView.layer.backgroundColor = [NSColor.controlBackgroundColor CGColor];
+    _summaryView.layer.cornerRadius = 8.0;
+    _summaryView.hidden = YES;
+    [c addSubview:_summaryView];
+
+    _toggleLogButton = [NSButton buttonWithTitle:L(@"Show log") target:self action:@selector(toggleLog:)];
+    _toggleLogButton.bezelStyle = NSBezelStyleRounded;
+    _toggleLogButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [c addSubview:_toggleLogButton];
 
     _cancelButton = [NSButton buttonWithTitle:L(@"Cancel") target:self action:@selector(cancel:)];
     _cancelButton.keyEquivalent = @"\033";
@@ -2277,40 +2329,228 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     [c addSubview:_closeButton];
 
     [NSLayoutConstraint activateConstraints:@[
-        [sv.topAnchor      constraintEqualToAnchor:c.topAnchor constant:12],
-        [sv.leadingAnchor  constraintEqualToAnchor:c.leadingAnchor constant:12],
-        [sv.trailingAnchor constraintEqualToAnchor:c.trailingAnchor constant:-12],
-        [sv.bottomAnchor   constraintEqualToAnchor:_cancelButton.topAnchor constant:-10],
+        [_currentFileLabel.topAnchor      constraintEqualToAnchor:c.topAnchor constant:16],
+        [_currentFileLabel.leadingAnchor  constraintEqualToAnchor:c.leadingAnchor constant:16],
+        [_currentFileLabel.trailingAnchor constraintEqualToAnchor:c.trailingAnchor constant:-16],
 
-        [_cancelButton.trailingAnchor constraintEqualToAnchor:c.trailingAnchor constant:-12],
-        [_cancelButton.bottomAnchor   constraintEqualToAnchor:c.bottomAnchor constant:-12],
+        [_statusLabel.topAnchor      constraintEqualToAnchor:_currentFileLabel.bottomAnchor constant:4],
+        [_statusLabel.leadingAnchor  constraintEqualToAnchor:c.leadingAnchor constant:16],
+        [_statusLabel.trailingAnchor constraintEqualToAnchor:c.trailingAnchor constant:-16],
 
-        [_closeButton.trailingAnchor constraintEqualToAnchor:c.trailingAnchor constant:-12],
-        [_closeButton.bottomAnchor   constraintEqualToAnchor:c.bottomAnchor constant:-12],
+        [_progressBar.topAnchor      constraintEqualToAnchor:_statusLabel.bottomAnchor constant:8],
+        [_progressBar.leadingAnchor  constraintEqualToAnchor:c.leadingAnchor constant:16],
+        [_progressBar.trailingAnchor constraintEqualToAnchor:c.trailingAnchor constant:-16],
+
+        [_summaryView.topAnchor      constraintEqualToAnchor:_progressBar.bottomAnchor constant:12],
+        [_summaryView.leadingAnchor  constraintEqualToAnchor:c.leadingAnchor constant:16],
+        [_summaryView.trailingAnchor constraintEqualToAnchor:c.trailingAnchor constant:-16],
+
+        [_logScrollView.topAnchor      constraintEqualToAnchor:_progressBar.bottomAnchor constant:12],
+        [_logScrollView.leadingAnchor  constraintEqualToAnchor:c.leadingAnchor constant:16],
+        [_logScrollView.trailingAnchor constraintEqualToAnchor:c.trailingAnchor constant:-16],
+        [_logScrollView.bottomAnchor   constraintEqualToAnchor:_cancelButton.topAnchor constant:-12],
+
+        [_toggleLogButton.leadingAnchor constraintEqualToAnchor:c.leadingAnchor constant:16],
+        [_toggleLogButton.bottomAnchor  constraintEqualToAnchor:c.bottomAnchor constant:-16],
+
+        [_cancelButton.trailingAnchor constraintEqualToAnchor:c.trailingAnchor constant:-16],
+        [_cancelButton.bottomAnchor   constraintEqualToAnchor:c.bottomAnchor constant:-16],
+
+        [_closeButton.trailingAnchor constraintEqualToAnchor:c.trailingAnchor constant:-16],
+        [_closeButton.bottomAnchor   constraintEqualToAnchor:c.bottomAnchor constant:-16],
     ]];
     return self;
 }
 
 - (void)appendText:(NSString *)s {
-    dispatch_async(dispatch_get_main_queue(), ^{
-        NSAttributedString *a = [[NSAttributedString alloc] initWithString:s
-            attributes:@{ NSFontAttributeName: self.textView.font,
-                          NSForegroundColorAttributeName: [NSColor labelColor] }];
-        [self.textView.textStorage appendAttributedString:a];
-        [self.textView scrollRangeToVisible:NSMakeRange(self.textView.textStorage.length, 0)];
-    });
+    NSAttributedString *a = [[NSAttributedString alloc] initWithString:s
+        attributes:@{ NSFontAttributeName: self.textView.font,
+                      NSForegroundColorAttributeName: [NSColor labelColor] }];
+    [self.textView.textStorage appendAttributedString:a];
+    [self.textView scrollRangeToVisible:NSMakeRange(self.textView.textStorage.length, 0)];
 }
 
 - (void)cancel:(id)sender {
     if (self.task.isRunning) [self.task terminate];
     self.cancelButton.enabled = NO;
-    [self appendText:@"\n[cancelled]\n"];
+    self.currentFileLabel.stringValue = L(@"Cancelling…");
+}
+
+- (void)toggleLog:(id)sender {
+    BOOL show = self.logScrollView.hidden;
+    self.logScrollView.hidden = !show;
+    self.summaryView.hidden = show || !self.finished;
+    self.toggleLogButton.title = show ? L(@"Hide log") : L(@"Show log");
 }
 
 - (void)closeSheet:(id)sender {
     NSWindow *parent = self.window.sheetParent;
     if (parent) [parent endSheet:self.window];
     else        [self.window close];
+}
+
+/* Parse a single rsync line (without trailing \n). */
+- (void)handleRsyncLine:(NSString *)line {
+    /* Collect --stats block at end. Starts with "Number of files:" for both old/new rsync. */
+    if ([line hasPrefix:@"Number of files:"]) self.inStatsBlock = YES;
+    if (self.inStatsBlock) {
+        [self.statsBuf appendFormat:@"%@\n", line];
+    }
+
+    /* Progress line:  "   1234567  45%    5.00MB/s    0:00:12 [(xfer#N, to-check=X/Y)]" */
+    NSString *trimmed = [line stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    static NSRegularExpression *rxProgress = nil;
+    static NSRegularExpression *rxToCheck = nil;
+    static dispatch_once_t onceTok; dispatch_once(&onceTok, ^{
+        rxProgress = [NSRegularExpression regularExpressionWithPattern:
+            @"^([\\d,]+)\\s+(\\d+)%\\s+(\\S+)\\s+(\\d+:\\d+:\\d+)"
+            options:0 error:nil];
+        rxToCheck = [NSRegularExpression regularExpressionWithPattern:
+            @"to-check=(\\d+)/(\\d+)"
+            options:0 error:nil];
+    });
+
+    NSTextCheckingResult *m = [rxProgress firstMatchInString:trimmed
+        options:0 range:NSMakeRange(0, trimmed.length)];
+    if (m && m.numberOfRanges >= 5) {
+        NSString *bytes = [trimmed substringWithRange:[m rangeAtIndex:1]];
+        NSString *pct   = [trimmed substringWithRange:[m rangeAtIndex:2]];
+        NSString *speed = [trimmed substringWithRange:[m rangeAtIndex:3]];
+        NSString *eta   = [trimmed substringWithRange:[m rangeAtIndex:4]];
+        self.statusLabel.stringValue = [NSString stringWithFormat:@"%@ B · %@%% · %@ · ETA %@",
+                                         bytes, pct, speed, eta];
+        NSTextCheckingResult *t = [rxToCheck firstMatchInString:trimmed
+            options:0 range:NSMakeRange(0, trimmed.length)];
+        if (t && t.numberOfRanges >= 3) {
+            double remain = [[trimmed substringWithRange:[t rangeAtIndex:1]] doubleValue];
+            double total  = [[trimmed substringWithRange:[t rangeAtIndex:2]] doubleValue];
+            if (total > 0) {
+                if (self.progressBar.indeterminate) {
+                    [self.progressBar stopAnimation:nil];
+                    self.progressBar.indeterminate = NO;
+                    self.progressBar.minValue = 0;
+                }
+                self.progressBar.maxValue = total;
+                self.progressBar.doubleValue = MAX(0.0, total - remain);
+                self.totalFiles = total;
+                self.filesDone = total - remain;
+            }
+        }
+        return;  /* progress lines don't become filenames */
+    }
+
+    /* Candidate filename lines: ignore empty, headers, summary. */
+    if (trimmed.length == 0) return;
+    if ([trimmed hasPrefix:@"sending incremental"] ||
+        [trimmed hasPrefix:@"receiving incremental"] ||
+        [trimmed hasPrefix:@"sending file list"] ||
+        [trimmed hasPrefix:@"receiving file list"] ||
+        [trimmed hasPrefix:@"building file list"] ||
+        [trimmed hasPrefix:@"sent "] ||
+        [trimmed hasPrefix:@"total size is"] ||
+        [trimmed hasPrefix:@"rsync:"] ||
+        [trimmed hasPrefix:@"rsync error:"] ||
+        self.inStatsBlock) return;
+
+    /* Looks like a filename/path — update current file label. */
+    self.currentFileLabel.stringValue = trimmed;
+}
+
+/* Consume an incoming chunk, split into complete lines, feed parser. */
+- (void)ingest:(NSString *)chunk {
+    [self.lineBuf appendString:chunk];
+    while (YES) {
+        NSRange r = [self.lineBuf rangeOfString:@"\n"];
+        NSRange r2 = [self.lineBuf rangeOfString:@"\r"];
+        NSRange split = r;
+        if (r2.location != NSNotFound && (r.location == NSNotFound || r2.location < r.location)) split = r2;
+        if (split.location == NSNotFound) break;
+        NSString *line = [self.lineBuf substringToIndex:split.location];
+        [self.lineBuf deleteCharactersInRange:NSMakeRange(0, split.location + split.length)];
+        [self handleRsyncLine:line];
+    }
+    [self appendText:chunk];
+}
+
+/* Parse the collected --stats block and show summary view. */
+- (NSDictionary *)parseStats {
+    NSMutableDictionary *out = [NSMutableDictionary dictionary];
+    for (NSString *raw in [self.statsBuf componentsSeparatedByString:@"\n"]) {
+        NSString *line = [raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        if (!line.length) continue;
+        NSRange colon = [line rangeOfString:@":"];
+        if (colon.location != NSNotFound) {
+            NSString *k = [[line substringToIndex:colon.location] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+            NSString *v = [[line substringFromIndex:colon.location + 1] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+            if (k && v) out[k] = v;
+        }
+        /* "sent X bytes  received Y bytes  Z bytes/sec" */
+        if ([line hasPrefix:@"sent "]) out[@"__sentLine"] = line;
+        if ([line hasPrefix:@"total size is"]) out[@"__totalLine"] = line;
+    }
+    return out;
+}
+
+- (NSTextField *)summaryKey:(NSString *)k value:(NSString *)v y:(CGFloat)y bold:(BOOL)bold {
+    NSTextField *lk = [NSTextField labelWithString:k];
+    lk.font = [NSFont systemFontOfSize:12 weight:bold ? NSFontWeightSemibold : NSFontWeightRegular];
+    lk.textColor = [NSColor secondaryLabelColor];
+    lk.frame = NSMakeRect(12, y, 200, 18);
+    [self.summaryView addSubview:lk];
+
+    NSTextField *lv = [NSTextField labelWithString:v ?: @"—"];
+    lv.font = [NSFont monospacedDigitSystemFontOfSize:12 weight:bold ? NSFontWeightSemibold : NSFontWeightRegular];
+    lv.textColor = [NSColor labelColor];
+    lv.frame = NSMakeRect(220, y, 400, 18);
+    lv.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    [self.summaryView addSubview:lv];
+    return lv;
+}
+
+- (void)buildSummaryForStatus:(int)status {
+    NSDictionary *s = [self parseStats];
+
+    /* Clear previous */
+    for (NSView *sub in [self.summaryView.subviews copy]) [sub removeFromSuperview];
+
+    /* Header */
+    NSImageView *icon = [[NSImageView alloc] initWithFrame:NSMakeRect(12, 150, 28, 28)];
+    icon.imageScaling = NSImageScaleProportionallyUpOrDown;
+    icon.image = status == 0
+        ? [NSImage imageWithSystemSymbolName:@"checkmark.circle.fill" accessibilityDescription:nil]
+        : [NSImage imageWithSystemSymbolName:@"exclamationmark.triangle.fill" accessibilityDescription:nil];
+    if (status == 0) icon.contentTintColor = [NSColor systemGreenColor];
+    else             icon.contentTintColor = [NSColor systemOrangeColor];
+    [self.summaryView addSubview:icon];
+
+    NSTextField *hdr = [NSTextField labelWithString:
+        status == 0 ? L(@"Sync complete")
+                    : [NSString stringWithFormat:L(@"Sync finished with errors (status %d)"), status]];
+    hdr.font = [NSFont systemFontOfSize:15 weight:NSFontWeightBold];
+    hdr.textColor = [NSColor labelColor];
+    hdr.frame = NSMakeRect(50, 152, 500, 22);
+    [self.summaryView addSubview:hdr];
+
+    /* Rows */
+    CGFloat y = 122;
+    CGFloat step = 22;
+    NSString *files    = s[@"Number of files"] ?: s[@"Number of files transferred"] ?: @"—";
+    NSString *xferred  = s[@"Number of regular files transferred"] ?: s[@"Number of files transferred"] ?: @"—";
+    NSString *totalSz  = s[@"Total file size"] ?: @"—";
+    NSString *xferSz   = s[@"Total transferred file size"] ?: @"—";
+    NSString *sentLine = s[@"__sentLine"] ?: @"—";
+    NSString *sizeLine = s[@"__totalLine"] ?: @"—";
+
+    [self summaryKey:L(@"Files scanned:")        value:files    y:y bold:NO]; y -= step;
+    [self summaryKey:L(@"Files transferred:")    value:xferred  y:y bold:YES]; y -= step;
+    [self summaryKey:L(@"Total size:")           value:totalSz  y:y bold:NO]; y -= step;
+    [self summaryKey:L(@"Transferred size:")     value:xferSz   y:y bold:YES]; y -= step;
+    [self summaryKey:L(@"Throughput:")           value:sentLine y:y bold:NO]; y -= step;
+    [self summaryKey:L(@"Overall:")              value:sizeLine y:y bold:NO]; y -= step;
+
+    [NSLayoutConstraint activateConstraints:@[
+        [self.summaryView.heightAnchor constraintGreaterThanOrEqualToConstant:190],
+    ]];
 }
 
 - (void)runArgs:(NSArray<NSString *> *)args
@@ -2339,13 +2579,15 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
         NSData *d = fh.availableData;
         if (d.length == 0) { fh.readabilityHandler = nil; return; }
         NSString *s = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
-        if (s) [weakSelf appendText:s];
+        if (!s.length) return;
+        dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf ingest:s]; });
     };
     errRd.readabilityHandler = ^(NSFileHandle *fh) {
         NSData *d = fh.availableData;
         if (d.length == 0) { fh.readabilityHandler = nil; return; }
         NSString *s = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
-        if (s) [weakSelf appendText:s];
+        if (!s.length) return;
+        dispatch_async(dispatch_get_main_queue(), ^{ [weakSelf ingest:s]; });
     };
     self.task.terminationHandler = ^(NSTask *t) {
         int status = t.terminationStatus;
@@ -2353,6 +2595,17 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
             typeof(self) s = weakSelf; if (!s) return;
             s.finished = YES;
             [s appendText:[NSString stringWithFormat:@"\n[rsync exited with status %d]\n", status]];
+            /* Flush any remaining buffered line */
+            if (s.lineBuf.length) { [s handleRsyncLine:s.lineBuf]; [s.lineBuf setString:@""]; }
+            [s.progressBar stopAnimation:nil];
+            if (!s.progressBar.indeterminate && status == 0) {
+                s.progressBar.doubleValue = s.progressBar.maxValue;
+            }
+            s.currentFileLabel.stringValue = status == 0 ? L(@"Sync complete") : L(@"Sync finished with errors");
+            s.statusLabel.stringValue = @"";
+            [s buildSummaryForStatus:status];
+            s.summaryView.hidden = NO;
+            s.progressBar.hidden = YES;
             s.cancelButton.hidden = YES;
             s.closeButton.hidden = NO;
             [s.window makeFirstResponder:s.closeButton];
@@ -3553,10 +3806,18 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     if ([p[@"archive"]  boolValue]) [args addObject:@"-a"];
     [args addObject:@"-v"];               /* always verbose so user sees what's happening */
     [args addObject:@"--human-readable"];
-    [args addObject:@"--info=progress2"]; /* overall progress line */
+    [args addObject:@"--progress"];       /* per-file progress (compatible with macOS /usr/bin/rsync 2.6.9) */
+    [args addObject:@"--stats"];          /* summary block for post-run graphical summary */
     if ([p[@"compress"] boolValue]) [args addObject:@"-z"];
+    if ([p[@"update"]   boolValue]) [args addObject:@"-u"];
+    if ([p[@"checksum"] boolValue]) [args addObject:@"-c"];
     if ([p[@"delete"]   boolValue]) [args addObject:@"--delete"];
     if ([p[@"dryRun"]   boolValue]) [args addObject:@"-n"];
+    if ([p[@"excludeDS"]   boolValue]) [args addObject:@"--exclude=.DS_Store"];
+    if ([p[@"excludeGit"]  boolValue]) [args addObject:@"--exclude=.git"];
+    if ([p[@"excludeNode"] boolValue]) [args addObject:@"--exclude=node_modules"];
+    NSString *bw = [p[@"bwlimit"] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    if (bw.length) [args addObject:[NSString stringWithFormat:@"--bwlimit=%@", bw]];
     NSString *extra = [p[@"extraArgs"] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
     if (extra.length) {
         /* naive split on whitespace — good enough for simple flags / --exclude='x' */
@@ -3564,13 +3825,23 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
             if (a.length) [args addObject:a];
         }
     }
-    NSString *src = p[@"source"];
     NSString *dst = p[@"dest"];
-    if (!src.length || !dst.length) return nil;
-    /* rsync semantics: trailing / on source = copy contents; without = copy the dir itself.
-     * Since users usually want "mirror the contents", append a / if not there and source is local dir. */
-    if (![src hasSuffix:@"/"]) src = [src stringByAppendingString:@"/"];
-    [args addObject:[src stringByExpandingTildeInPath]];
+    if (!dst.length) return nil;
+    NSArray<NSString *> *sources = p[@"sources"];
+    if ([sources isKindOfClass:[NSArray class]] && sources.count > 0) {
+        /* Selection-based sync: copy each selected item into dest as-is (no trailing /). */
+        for (NSString *s in sources) {
+            if (!s.length) continue;
+            [args addObject:[s stringByExpandingTildeInPath]];
+        }
+    } else {
+        NSString *src = p[@"source"];
+        if (!src.length) return nil;
+        /* rsync semantics: trailing / on source = copy contents; without = copy the dir itself.
+         * Users usually want "mirror the contents", so append / if not there. */
+        if (![src hasSuffix:@"/"]) src = [src stringByAppendingString:@"/"];
+        [args addObject:[src stringByExpandingTildeInPath]];
+    }
     [args addObject:[dst stringByExpandingTildeInPath]];
     return args;
 }
@@ -3607,56 +3878,123 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
 
 /* Build shared accessory for sync dialog (source, dest, options, extraArgs) */
 - (NSDictionary *)buildSyncForm:(NSView **)outView profile:(NSDictionary *)p {
-    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 520, 240)];
+    NSView *acc = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 600, 400)];
 
-    NSTextField *nameLbl = [NSTextField labelWithString:@"Name:"];
-    nameLbl.frame = NSMakeRect(0, 208, 70, 20);
-    NSTextField *nameField = [[NSTextField alloc] initWithFrame:NSMakeRect(74, 204, 440, 24)];
-    nameField.placeholderString = @"e.g. Backup Documents";
+    CGFloat labelX = 0, fieldX = 74, fieldW = 520, H = 22;
+
+    NSTextField *nameLbl = [NSTextField labelWithString:L(@"Name:")];
+    nameLbl.frame = NSMakeRect(labelX, 372, 70, 20);
+    NSTextField *nameField = [[NSTextField alloc] initWithFrame:NSMakeRect(fieldX, 368, fieldW, 24)];
+    nameField.placeholderString = L(@"e.g. Backup Documents");
     nameField.stringValue = p[@"name"] ?: @"";
 
-    NSTextField *srcLbl = [NSTextField labelWithString:@"Source:"];
-    srcLbl.frame = NSMakeRect(0, 176, 70, 20);
-    NSTextField *srcField = [[NSTextField alloc] initWithFrame:NSMakeRect(74, 172, 440, 24)];
-    srcField.placeholderString = @"local path or user@host:/path";
+    NSTextField *srcLbl = [NSTextField labelWithString:L(@"Source:")];
+    srcLbl.frame = NSMakeRect(labelX, 340, 70, 20);
+    NSTextField *srcField = [[NSTextField alloc] initWithFrame:NSMakeRect(fieldX, 336, fieldW, 24)];
+    srcField.placeholderString = L(@"local path or user@host:/path");
     srcField.stringValue = p[@"source"] ?: @"";
+    NSArray<NSString *> *seededSources = p[@"sources"];
+    if ([seededSources isKindOfClass:[NSArray class]] && seededSources.count > 0) {
+        srcField.editable = NO;
+        srcField.drawsBackground = NO;
+        srcField.bezeled = NO;
+        srcField.selectable = YES;
+    }
 
-    NSTextField *dstLbl = [NSTextField labelWithString:@"Dest:"];
-    dstLbl.frame = NSMakeRect(0, 144, 70, 20);
-    NSTextField *dstField = [[NSTextField alloc] initWithFrame:NSMakeRect(74, 140, 440, 24)];
-    dstField.placeholderString = @"local path or user@host:/path";
+    NSTextField *dstLbl = [NSTextField labelWithString:L(@"Dest:")];
+    dstLbl.frame = NSMakeRect(labelX, 308, 70, 20);
+    NSTextField *dstField = [[NSTextField alloc] initWithFrame:NSMakeRect(fieldX, 304, fieldW, 24)];
+    dstField.placeholderString = L(@"local path or user@host:/path");
     dstField.stringValue = p[@"dest"] ?: @"";
 
-    NSButton *archive  = [NSButton checkboxWithTitle:@"Archive mode (-a: recursive, preserve)" target:nil action:nil];
-    archive.frame  = NSMakeRect(74, 112, 440, 20);
+    /* ── Transfer ── */
+    NSTextField *hTransfer = [NSTextField labelWithString:L(@"Transfer")];
+    hTransfer.font = [NSFont boldSystemFontOfSize:12];
+    hTransfer.frame = NSMakeRect(0, 272, 200, 18);
+
+    NSButton *archive  = [NSButton checkboxWithTitle:L(@"Archive (-a: recursive, preserve)") target:nil action:nil];
+    archive.frame  = NSMakeRect(fieldX, 248, 280, H);
     archive.state = ([p objectForKey:@"archive"] ? [p[@"archive"] boolValue] : YES) ? NSControlStateValueOn : NSControlStateValueOff;
 
-    NSButton *compress = [NSButton checkboxWithTitle:@"Compress during transfer (-z)" target:nil action:nil];
-    compress.frame = NSMakeRect(74, 88, 440, 20);
+    NSButton *compress = [NSButton checkboxWithTitle:L(@"Compress (-z)") target:nil action:nil];
+    compress.frame = NSMakeRect(360, 248, 234, H);
     compress.state = [p[@"compress"] boolValue] ? NSControlStateValueOn : NSControlStateValueOff;
 
-    NSButton *delete_  = [NSButton checkboxWithTitle:@"Delete extras at destination (--delete, DANGEROUS)" target:nil action:nil];
-    delete_.frame  = NSMakeRect(74, 64, 440, 20);
-    delete_.state = [p[@"delete"] boolValue] ? NSControlStateValueOn : NSControlStateValueOff;
+    NSButton *update_  = [NSButton checkboxWithTitle:L(@"Update only — skip newer at dest (-u)") target:nil action:nil];
+    update_.frame  = NSMakeRect(fieldX, 222, 280, H);
+    update_.state = [p[@"update"] boolValue] ? NSControlStateValueOn : NSControlStateValueOff;
 
-    NSButton *dryRun   = [NSButton checkboxWithTitle:@"Dry run — preview only, no actual changes (-n)" target:nil action:nil];
-    dryRun.frame   = NSMakeRect(74, 40, 440, 20);
+    NSButton *checksum = [NSButton checkboxWithTitle:L(@"Checksum compare (-c)") target:nil action:nil];
+    checksum.frame = NSMakeRect(360, 222, 234, H);
+    checksum.state = [p[@"checksum"] boolValue] ? NSControlStateValueOn : NSControlStateValueOff;
+
+    /* ── Safety ── */
+    NSTextField *hSafety = [NSTextField labelWithString:L(@"Safety")];
+    hSafety.font = [NSFont boldSystemFontOfSize:12];
+    hSafety.frame = NSMakeRect(0, 192, 200, 18);
+
+    NSButton *dryRun   = [NSButton checkboxWithTitle:L(@"Dry run — preview only (-n)") target:nil action:nil];
+    dryRun.frame   = NSMakeRect(fieldX, 168, 280, H);
     dryRun.state = [p[@"dryRun"] boolValue] ? NSControlStateValueOn : NSControlStateValueOff;
 
-    NSTextField *extraLbl = [NSTextField labelWithString:@"Extra:"];
-    extraLbl.frame = NSMakeRect(0, 8, 70, 20);
-    NSTextField *extraField = [[NSTextField alloc] initWithFrame:NSMakeRect(74, 4, 440, 24)];
-    extraField.placeholderString = @"extra rsync flags, e.g. --exclude='.DS_Store'";
+    NSButton *delete_  = [NSButton checkboxWithTitle:L(@"Delete extras at dest (--delete) ⚠︎") target:nil action:nil];
+    delete_.frame  = NSMakeRect(360, 168, 234, H);
+    delete_.state = [p[@"delete"] boolValue] ? NSControlStateValueOn : NSControlStateValueOff;
+
+    /* ── Exclude ── */
+    NSTextField *hExclude = [NSTextField labelWithString:L(@"Exclude")];
+    hExclude.font = [NSFont boldSystemFontOfSize:12];
+    hExclude.frame = NSMakeRect(0, 138, 200, 18);
+
+    NSButton *exDS = [NSButton checkboxWithTitle:@".DS_Store" target:nil action:nil];
+    exDS.frame = NSMakeRect(fieldX, 114, 160, H);
+    exDS.state = [p[@"excludeDS"] boolValue] ? NSControlStateValueOn : NSControlStateValueOff;
+
+    NSButton *exGit = [NSButton checkboxWithTitle:@".git" target:nil action:nil];
+    exGit.frame = NSMakeRect(fieldX + 170, 114, 120, H);
+    exGit.state = [p[@"excludeGit"] boolValue] ? NSControlStateValueOn : NSControlStateValueOff;
+
+    NSButton *exNode = [NSButton checkboxWithTitle:@"node_modules" target:nil action:nil];
+    exNode.frame = NSMakeRect(fieldX + 300, 114, 200, H);
+    exNode.state = [p[@"excludeNode"] boolValue] ? NSControlStateValueOn : NSControlStateValueOff;
+
+    /* ── Advanced ── */
+    NSTextField *hAdv = [NSTextField labelWithString:L(@"Advanced")];
+    hAdv.font = [NSFont boldSystemFontOfSize:12];
+    hAdv.frame = NSMakeRect(0, 84, 200, 18);
+
+    NSTextField *bwLbl = [NSTextField labelWithString:L(@"Limit:")];
+    bwLbl.frame = NSMakeRect(labelX, 56, 70, 20);
+    NSTextField *bwField = [[NSTextField alloc] initWithFrame:NSMakeRect(fieldX, 52, 120, 24)];
+    bwField.placeholderString = @"0 = no limit";
+    bwField.stringValue = p[@"bwlimit"] ?: @"";
+    NSTextField *bwUnit = [NSTextField labelWithString:L(@"KB/s")];
+    bwUnit.textColor = [NSColor secondaryLabelColor];
+    bwUnit.frame = NSMakeRect(fieldX + 128, 56, 140, 20);
+
+    NSTextField *extraLbl = [NSTextField labelWithString:L(@"Extra:")];
+    extraLbl.frame = NSMakeRect(labelX, 24, 70, 20);
+    NSTextField *extraField = [[NSTextField alloc] initWithFrame:NSMakeRect(fieldX, 20, fieldW, 24)];
+    extraField.placeholderString = L(@"extra rsync flags");
     extraField.stringValue = p[@"extraArgs"] ?: @"";
 
     for (NSView *v in @[nameLbl, nameField, srcLbl, srcField, dstLbl, dstField,
-                        archive, compress, delete_, dryRun, extraLbl, extraField])
+                        hTransfer, archive, compress, update_, checksum,
+                        hSafety, dryRun, delete_,
+                        hExclude, exDS, exGit, exNode,
+                        hAdv, bwLbl, bwField, bwUnit, extraLbl, extraField])
         [acc addSubview:v];
 
     if (outView) *outView = acc;
-    return @{ @"name": nameField, @"source": srcField, @"dest": dstField,
-              @"archive": archive, @"compress": compress, @"delete": delete_,
-              @"dryRun": dryRun, @"extraArgs": extraField };
+    NSMutableDictionary *out = [@{ @"name": nameField, @"source": srcField, @"dest": dstField,
+              @"archive": archive, @"compress": compress, @"update": update_, @"checksum": checksum,
+              @"delete": delete_, @"dryRun": dryRun,
+              @"excludeDS": exDS, @"excludeGit": exGit, @"excludeNode": exNode,
+              @"bwlimit": bwField, @"extraArgs": extraField } mutableCopy];
+    if ([seededSources isKindOfClass:[NSArray class]] && seededSources.count > 0) {
+        out[@"sources"] = seededSources;
+    }
+    return out;
 }
 
 - (NSDictionary *)readSyncForm:(NSDictionary *)fields {
@@ -3667,31 +4005,51 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     BOOL (^cv)(NSString *) = ^(NSString *k) {
         return (BOOL)(((NSButton *)fields[k]).state == NSControlStateValueOn);
     };
-    return @{
-        @"name":      tv(@"name")      ?: @"",
-        @"source":    tv(@"source")    ?: @"",
-        @"dest":      tv(@"dest")      ?: @"",
-        @"archive":   @(cv(@"archive")),
-        @"compress":  @(cv(@"compress")),
-        @"delete":    @(cv(@"delete")),
-        @"dryRun":    @(cv(@"dryRun")),
-        @"extraArgs": tv(@"extraArgs") ?: @"",
-    };
+    NSMutableDictionary *out = [@{
+        @"name":        tv(@"name")      ?: @"",
+        @"source":      tv(@"source")    ?: @"",
+        @"dest":        tv(@"dest")      ?: @"",
+        @"archive":     @(cv(@"archive")),
+        @"compress":    @(cv(@"compress")),
+        @"update":      @(cv(@"update")),
+        @"checksum":    @(cv(@"checksum")),
+        @"delete":      @(cv(@"delete")),
+        @"dryRun":      @(cv(@"dryRun")),
+        @"excludeDS":   @(cv(@"excludeDS")),
+        @"excludeGit":  @(cv(@"excludeGit")),
+        @"excludeNode": @(cv(@"excludeNode")),
+        @"bwlimit":     tv(@"bwlimit")   ?: @"",
+        @"extraArgs":   tv(@"extraArgs") ?: @"",
+    } mutableCopy];
+    NSArray *srcs = fields[@"sources"];
+    if ([srcs isKindOfClass:[NSArray class]] && srcs.count > 0) {
+        out[@"sources"] = srcs;
+    }
+    return out;
 }
 
 - (void)syncSourceToDestAction:(id)sender {
     ListerWindowController *src = _activeSource;
     ListerWindowController *dst = _activeDest;
-    NSDictionary *seed = @{
+    NSArray<NSString *> *selection = [src selectedPaths];
+    NSString *srcDisplay = src.currentPath ?: @"";
+    NSMutableDictionary *seed = [@{
         @"name":     @"",
-        @"source":   src.currentPath ?: @"",
+        @"source":   srcDisplay,
         @"dest":     dst.currentPath ?: @"",
         @"archive":  @YES,
         @"compress": @NO,
         @"delete":   @NO,
         @"dryRun":   @NO,
         @"extraArgs": @"",
-    };
+    } mutableCopy];
+    if (selection.count > 0) {
+        seed[@"sources"] = selection;
+        seed[@"source"] = [NSString stringWithFormat:@"%lu selected item%@ in %@",
+                           (unsigned long)selection.count,
+                           selection.count == 1 ? @"" : @"s",
+                           src.currentPath ?: @""];
+    }
 
     NSAlert *alert = [[NSAlert alloc] init];
     alert.messageText = @"Sync with rsync";
@@ -3719,6 +4077,12 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
             [self showAlert:@"Save Profile"
                        info:@"Profile needs a name."
                       style:NSAlertStyleInformational];
+            return;
+        }
+        if ([profile[@"sources"] isKindOfClass:[NSArray class]]) {
+            [self showAlert:@"Save Profile"
+                       info:@"Profiles can't be saved from a selection. Run the sync now, or clear the selection and reopen the dialog to save a folder-level profile."
+                      style:NSAlertStyleWarning];
             return;
         }
         NSMutableArray *all = [[[NSUserDefaults standardUserDefaults] arrayForKey:@"rsyncProfiles"] mutableCopy] ?: [NSMutableArray array];
