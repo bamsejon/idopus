@@ -6126,7 +6126,8 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
  *   ~/.ssh/config       — explicit Host/HostName entries (skip wildcards)
  *   /etc/hosts          — non-loopback entries */
 - (void)loadKnownHosts {
-    NSMutableSet<NSString *> *names = [NSMutableSet set];
+    NSMutableSet<NSString *> *sshNames = [NSMutableSet set];
+    NSMutableSet<NSString *> *ambiguousNames = [NSMutableSet set];
 
     NSString *kh = [@"~/.ssh/known_hosts" stringByExpandingTildeInPath];
     NSString *khData = [NSString stringWithContentsOfFile:kh encoding:NSUTF8StringEncoding error:nil];
@@ -6137,22 +6138,18 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
         NSArray *parts = [line componentsSeparatedByString:@" "];
         if (parts.count < 2) continue;
         for (NSString *h in [parts[0] componentsSeparatedByString:@","]) {
-            NSString *hh = h;
-            /* Strip [host]:port wrapping. */
+            NSString *hh = [h stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
             if ([hh hasPrefix:@"["]) {
                 NSRange r = [hh rangeOfString:@"]"];
                 if (r.location != NSNotFound && r.location > 1)
                     hh = [hh substringWithRange:NSMakeRange(1, r.location - 1)];
             }
-            /* Skip bare IPs — we already port-scan those. The goal here is
-             * to surface *named* hosts the scan misses. */
-            if (hh.length && ![self _isBareIP:hh]) [names addObject:hh];
+            if (hh.length && ![self _isBareIP:hh]) [sshNames addObject:hh];
         }
     }
 
     NSString *cfg = [@"~/.ssh/config" stringByExpandingTildeInPath];
     NSString *cfgData = [NSString stringWithContentsOfFile:cfg encoding:NSUTF8StringEncoding error:nil];
-    NSString *pendingHost = nil;
     for (NSString *raw in [cfgData componentsSeparatedByString:@"\n"]) {
         NSString *line = [raw stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
         if (!line.length || [line hasPrefix:@"#"]) continue;
@@ -6162,17 +6159,16 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
         NSString *kw = [parts[0] lowercaseString];
         if ([kw isEqualToString:@"host"]) {
             for (NSUInteger i = 1; i < parts.count; i++) {
-                NSString *h = parts[i];
-                /* Skip wildcards — they're patterns, not real hostnames. */
+                NSString *h = [parts[i] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+                if (!h.length) continue;
                 if ([h containsString:@"*"] || [h containsString:@"?"]) continue;
-                if (![self _isBareIP:h]) [names addObject:h];
-                pendingHost = h;
+                if (![self _isBareIP:h]) [sshNames addObject:h];
             }
         } else if ([kw isEqualToString:@"hostname"] && parts.count >= 2) {
-            if (![self _isBareIP:parts[1]]) [names addObject:parts[1]];
+            NSString *h = [parts[1] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+            if (h.length && ![self _isBareIP:h]) [sshNames addObject:h];
         }
     }
-    (void)pendingHost;
 
     NSString *hostsData = [NSString stringWithContentsOfFile:@"/etc/hosts"
                                                     encoding:NSUTF8StringEncoding error:nil];
@@ -6186,16 +6182,17 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
         if ([ip isEqualToString:@"127.0.0.1"] || [ip isEqualToString:@"::1"] ||
             [ip hasPrefix:@"fe80"] || [ip isEqualToString:@"255.255.255.255"]) continue;
         for (NSUInteger i = 1; i < parts.count; i++) {
-            NSString *h = parts[i];
+            NSString *h = [parts[i] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
             if (h.length && ![h isEqualToString:@"localhost"] &&
-                ![self _isBareIP:h]) [names addObject:h];
+                ![self _isBareIP:h]) [ambiguousNames addObject:h];
         }
     }
 
-    /* Surface each named host under both SFTP and SMB — we don't know which
-     * one it actually speaks until the user tries. Dedupe against any
-     * existing discovered entry with the same host+protocol. */
-    for (NSString *name in names) {
+    /* SSH-origin hosts: only surface as SFTP — user already proved they
+     * SSH'd to them, don't guess that they also speak SMB.
+     * /etc/hosts: we can't tell; surface as both. */
+    for (NSString *name in sshNames) [self _addKnownHost:name protocol:@"sftp"];
+    for (NSString *name in ambiguousNames) {
         [self _addKnownHost:name protocol:@"sftp"];
         [self _addKnownHost:name protocol:@"smb"];
     }
@@ -6208,6 +6205,7 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
 }
 
 - (void)_addKnownHost:(NSString *)host protocol:(NSString *)proto {
+    if (!host.length || !proto.length) return;
     for (NSDictionary *e in _discovered) {
         if ([e[@"host"] isEqualToString:host] &&
             [e[@"protocol"] isEqualToString:proto]) return;
