@@ -6241,13 +6241,12 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
         [lister loadRemotePath:path];
         [lister.window makeKeyAndOrderFront:nil];
     };
-    NSWindow *parent = [NSApp keyWindow] ?: _activeSource.window;
-    if (parent) {
-        [parent beginSheet:_connectDialog.window completionHandler:^(NSModalResponse r) { (void)r; }];
-    } else {
-        [_connectDialog.window center];
-        [_connectDialog.window makeKeyAndOrderFront:nil];
-    }
+    /* Open as a free-floating window instead of a sheet — sheets are
+     * nailed to their parent's top edge and can't be moved. The Connect
+     * dialog is wide enough that users want to drag it to whichever
+     * monitor or corner works for them. */
+    [_connectDialog.window center];
+    [_connectDialog.window makeKeyAndOrderFront:nil];
 }
 
 @end
@@ -7172,7 +7171,8 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
 }
 
 - (void)cancel:(id)sender {
-    [self.window.sheetParent endSheet:self.window returnCode:NSModalResponseCancel];
+    NSWindow *parent = self.window.sheetParent;
+    if (parent) [parent endSheet:self.window returnCode:NSModalResponseCancel];
     [self.window close];
 }
 
@@ -7234,7 +7234,7 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
             if (obscured.length) record[@"obscuredPass"] = obscured;
             [ConnectDialogController rememberConnection:record];
             NSWindow *parent = self.window.sheetParent;
-            [parent endSheet:self.window returnCode:NSModalResponseOK];
+            if (parent) [parent endSheet:self.window returnCode:NSModalResponseOK];
             [self.window close];
             if (self.onConnect) self.onConnect(display, spec, probe);
         }];
