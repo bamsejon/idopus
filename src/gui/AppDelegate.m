@@ -322,10 +322,17 @@ typedef NS_ENUM(NSInteger, ListerState) {
 @property (nonatomic, strong) NSTextField *statsLabel;     /* "381 MB of 6.5 GB — 11.5 MB/s — 9 min" */
 @property (nonatomic, strong) NSProgressIndicator *spinner;
 @property (nonatomic, strong) NSButton *cancelButton;
+@property (nonatomic, strong) NSButton *disclosureButton;
+@property (nonatomic, strong) NSTextView *logView;
+@property (nonatomic, strong) NSScrollView *logScroll;
+@property (nonatomic, strong) NSLayoutConstraint *logHeightConstraint;
 @property (atomic, assign) BOOL cancelled;
+@property (nonatomic, assign) BOOL detailsExpanded;
 /* Optional: handler invoked by cancel: so jobs that don't use runOperation:
  * (rclone-backed downloads, etc.) can terminate their own tasks. */
 @property (nonatomic, copy) void (^cancelHandler)(void);
+
+- (void)appendLogLine:(NSString *)line;
 - (void)runOperation:(BOOL)isMove
                paths:(NSArray<NSString *> *)paths
                names:(NSArray<NSString *> *)names
@@ -343,6 +350,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
 + (instancetype)shared;
 - (void)addJobRow:(NSView *)row;
 - (void)removeJobRow:(NSView *)row;
+- (void)relayoutForExpandedRow;
 @end
 
 @interface ListerWindowController : NSWindowController <NSWindowDelegate, QLPreviewPanelDataSource, QLPreviewPanelDelegate, NSMenuDelegate, NSSearchFieldDelegate>
@@ -2319,13 +2327,51 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     _cancelButton.translatesAutoresizingMaskIntoConstraints = NO;
     [_rowView addSubview:_cancelButton];
 
+    /* Disclosure triangle on the left toggles the detail log. */
+    _disclosureButton = [[NSButton alloc] init];
+    _disclosureButton.bezelStyle = NSBezelStyleDisclosure;
+    [_disclosureButton setButtonType:NSButtonTypePushOnPushOff];
+    _disclosureButton.title = @"";
+    _disclosureButton.state = NSControlStateValueOff;
+    _disclosureButton.target = self;
+    _disclosureButton.action = @selector(toggleDetails:);
+    _disclosureButton.toolTip = L(@"Show transfer details");
+    _disclosureButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [_rowView addSubview:_disclosureButton];
+
+    /* Scrollable log view — starts collapsed (height 0) and expands to show
+     * the raw rclone/file-op output when the disclosure triangle is on. */
+    _logScroll = [[NSScrollView alloc] init];
+    _logScroll.borderType = NSBezelBorder;
+    _logScroll.hasVerticalScroller = YES;
+    _logScroll.autohidesScrollers = NO;
+    _logScroll.translatesAutoresizingMaskIntoConstraints = NO;
+    _logScroll.hidden = YES;
+
+    _logView = [[NSTextView alloc] init];
+    _logView.editable = NO;
+    _logView.richText = NO;
+    _logView.font = [NSFont monospacedSystemFontOfSize:10 weight:NSFontWeightRegular];
+    _logView.drawsBackground = YES;
+    _logView.backgroundColor = [NSColor textBackgroundColor];
+    _logView.textContainer.widthTracksTextView = YES;
+    _logView.autoresizingMask = NSViewWidthSizable;
+    _logScroll.documentView = _logView;
+    [_rowView addSubview:_logScroll];
+
+    _logHeightConstraint = [_logScroll.heightAnchor constraintEqualToConstant:0];
+
     [NSLayoutConstraint activateConstraints:@[
+        [_disclosureButton.leadingAnchor  constraintEqualToAnchor:_rowView.leadingAnchor constant:8],
+        [_disclosureButton.centerYAnchor  constraintEqualToAnchor:_titleLabel.centerYAnchor],
+        [_disclosureButton.widthAnchor    constraintEqualToConstant:13],
+
         [_cancelButton.trailingAnchor  constraintEqualToAnchor:_rowView.trailingAnchor constant:-8],
         [_cancelButton.topAnchor       constraintEqualToAnchor:_rowView.topAnchor constant:6],
         [_cancelButton.widthAnchor     constraintEqualToConstant:18],
         [_cancelButton.heightAnchor    constraintEqualToConstant:18],
 
-        [_titleLabel.leadingAnchor     constraintEqualToAnchor:_rowView.leadingAnchor constant:12],
+        [_titleLabel.leadingAnchor     constraintEqualToAnchor:_disclosureButton.trailingAnchor constant:6],
         [_titleLabel.trailingAnchor    constraintEqualToAnchor:_cancelButton.leadingAnchor constant:-8],
         [_titleLabel.topAnchor         constraintEqualToAnchor:_rowView.topAnchor constant:6],
 
@@ -2337,10 +2383,42 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
         [_statsLabel.leadingAnchor     constraintEqualToAnchor:_rowView.leadingAnchor constant:12],
         [_statsLabel.trailingAnchor    constraintEqualToAnchor:_rowView.trailingAnchor constant:-12],
         [_statsLabel.topAnchor         constraintEqualToAnchor:_spinner.bottomAnchor constant:4],
-        [_statsLabel.bottomAnchor      constraintEqualToAnchor:_rowView.bottomAnchor constant:-6],
+
+        [_logScroll.leadingAnchor      constraintEqualToAnchor:_rowView.leadingAnchor constant:12],
+        [_logScroll.trailingAnchor     constraintEqualToAnchor:_rowView.trailingAnchor constant:-12],
+        [_logScroll.topAnchor          constraintEqualToAnchor:_statsLabel.bottomAnchor constant:6],
+        [_logScroll.bottomAnchor       constraintEqualToAnchor:_rowView.bottomAnchor constant:-6],
+        _logHeightConstraint,
     ]];
 
     return self;
+}
+
+- (void)toggleDetails:(id)sender {
+    self.detailsExpanded = !self.detailsExpanded;
+    self.logScroll.hidden = !self.detailsExpanded;
+    self.logHeightConstraint.constant = self.detailsExpanded ? 160 : 0;
+    self.disclosureButton.toolTip = self.detailsExpanded
+        ? L(@"Hide transfer details") : L(@"Show transfer details");
+    [[JobsPanelController shared] relayoutForExpandedRow];
+}
+
+- (void)appendLogLine:(NSString *)line {
+    if (!line.length) return;
+    NSString *text = [line hasSuffix:@"\n"] ? line
+                                            : [line stringByAppendingString:@"\n"];
+    NSAttributedString *a = [[NSAttributedString alloc] initWithString:text
+        attributes:@{ NSFontAttributeName: self.logView.font,
+                      NSForegroundColorAttributeName: [NSColor labelColor] }];
+    [self.logView.textStorage appendAttributedString:a];
+    /* Trim if gigantic — keep the last 4k lines' worth roughly. */
+    if (self.logView.textStorage.length > 400000) {
+        [self.logView.textStorage deleteCharactersInRange:NSMakeRange(0, 200000)];
+    }
+    if (self.detailsExpanded) {
+        [self.logView scrollRangeToVisible:
+            NSMakeRange(self.logView.textStorage.length, 0)];
+    }
 }
 
 - (void)cancel:(id)sender {
@@ -2602,6 +2680,11 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     [self.window.contentView layoutSubtreeIfNeeded];
     [self.window center];
     [self.window orderFront:nil];
+}
+
+- (void)relayoutForExpandedRow {
+    [self.window.contentView layoutSubtreeIfNeeded];
+    [self.window setContentSize:[self fittingSize]];
 }
 
 - (void)removeJobRow:(NSView *)row {
@@ -5731,6 +5814,7 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
                           remotePath:remotePath
                              toLocal:destDir
                             progress:^(NSString *line) {
+            [job appendLogLine:line];
             NSTextCheckingResult *m = [rxProgress firstMatchInString:line
                 options:0 range:NSMakeRange(0, line.length)];
             if (!m) return;
@@ -6278,6 +6362,10 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     NSNetServiceBrowser *_sshBrowser;
     NSNetServiceBrowser *_smbBrowser;
     NSMutableArray<NSNetService *> *_resolving;
+    /* When the user clicks a SAVED row that has a stored obscured password,
+     * this is set so Connect can reuse it without re-prompting. Cleared if
+     * the user types anything fresh in the password field. */
+    NSString *_savedObscured;
 }
 
 - (instancetype)init {
@@ -6413,15 +6501,36 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
 #pragma mark Sidebar data
 
 + (NSArray<NSDictionary *> *)savedConnections {
-    return [[NSUserDefaults standardUserDefaults] arrayForKey:@"sftpSavedConnections"] ?: @[];
+    NSArray *raw = [[NSUserDefaults standardUserDefaults] arrayForKey:@"sftpSavedConnections"] ?: @[];
+    /* Filter out corrupt entries (missing host) that older builds may have
+     * written — they render as a bare "SMB" / "SFTP" row and can't be used. */
+    NSMutableArray *clean = [NSMutableArray array];
+    for (NSDictionary *c in raw) {
+        NSString *h = c[@"host"];
+        if ([h isKindOfClass:[NSString class]] && h.length) [clean addObject:c];
+    }
+    if (clean.count != raw.count) {
+        [[NSUserDefaults standardUserDefaults] setObject:clean forKey:@"sftpSavedConnections"];
+    }
+    return clean;
 }
 
 + (void)rememberConnection:(NSDictionary *)conn {
+    /* Refuse to persist a connection without a host — one of those would
+     * render as a bare "SMB" / "SFTP" row in SAVED and do nothing useful. */
+    NSString *host = conn[@"host"];
+    if (![host isKindOfClass:[NSString class]] || host.length == 0) return;
+
     NSMutableArray *all = [[self savedConnections] mutableCopy] ?: [NSMutableArray array];
-    /* Dedup by host+user+port. */
-    NSString *key = [NSString stringWithFormat:@"%@@%@:%@", conn[@"user"] ?: @"", conn[@"host"] ?: @"", conn[@"port"] ?: @""];
+    /* Dedup by protocol+host+user+port — same server over different protocols
+     * is two logical entries, not one. */
+    NSString *key = [NSString stringWithFormat:@"%@|%@@%@:%@",
+                      conn[@"protocol"] ?: @"sftp",
+                      conn[@"user"] ?: @"", host, conn[@"port"] ?: @""];
     for (NSDictionary *c in [all copy]) {
-        NSString *k = [NSString stringWithFormat:@"%@@%@:%@", c[@"user"] ?: @"", c[@"host"] ?: @"", c[@"port"] ?: @""];
+        NSString *k = [NSString stringWithFormat:@"%@|%@@%@:%@",
+                        c[@"protocol"] ?: @"sftp",
+                        c[@"user"] ?: @"", c[@"host"] ?: @"", c[@"port"] ?: @""];
         if ([k isEqualToString:key]) [all removeObject:c];
     }
     [all insertObject:conn atIndex:0];  /* most recent first */
@@ -6888,6 +6997,29 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     _portField.stringValue = port;
     _userField.stringValue = user;
     if (path.length) _pathField.stringValue = path;
+
+    /* Pick up a stored obscured password from the matching SAVED row, if any.
+     * Clear the password field and drop a hint placeholder so the user
+     * knows a credential is on file — they hit Connect, we reuse the spec. */
+    _savedObscured = nil;
+    _passField.stringValue = @"";
+    _passField.placeholderString = L(@"(enter password)");
+    NSString *obscured = d[@"obscuredPass"];
+    if (!obscured.length) {
+        for (NSDictionary *saved in [ConnectDialogController savedConnections]) {
+            NSString *sproto = saved[@"protocol"] ?: @"sftp";
+            if (![saved[@"host"] isEqualToString:host]) continue;
+            if (![sproto isEqualToString:proto]) continue;
+            if ([saved[@"user"] length] && user.length &&
+                ![saved[@"user"] isEqualToString:user]) continue;
+            obscured = saved[@"obscuredPass"];
+            if (obscured.length) break;
+        }
+    }
+    if (obscured.length) {
+        _savedObscured = [obscured copy];
+        _passField.placeholderString = L(@"(saved — leave blank to reuse)");
+    }
     [self.window makeFirstResponder:_passField];
 }
 
@@ -6959,12 +7091,17 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
             }
             (void)entries;
             NSString *display = [NSString stringWithFormat:@"%@ %@@%@", [proto uppercaseString], user, host];
-            /* Remember the connection (minus password — that's per-session). */
-            [ConnectDialogController rememberConnection:@{
+            /* Persist the connection including the obscured password so next
+             * launch / next dialog open can one-click reconnect. rclone's
+             * obscure is not real encryption — just reversible obfuscation —
+             * so treat it as "at least not clear-text", not as secure. */
+            NSMutableDictionary *record = [@{
                 @"host": host, @"port": port ?: @"", @"user": user,
                 @"path": path, @"protocol": proto, @"source": @"saved",
                 @"displayName": display,
-            }];
+            } mutableCopy];
+            if (obscured.length) record[@"obscuredPass"] = obscured;
+            [ConnectDialogController rememberConnection:record];
             NSWindow *parent = self.window.sheetParent;
             [parent endSheet:self.window returnCode:NSModalResponseOK];
             [self.window close];
@@ -6980,6 +7117,9 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
             }
             build(obscured);
         }];
+    } else if (_savedObscured.length) {
+        /* Blank field + we have a stored credential → reuse it directly. */
+        build(_savedObscured);
     } else {
         build(nil);
     }

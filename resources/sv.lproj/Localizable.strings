@@ -214,3 +214,7 @@
 "%@ of %@"                = "%@ av %@";
 "remaining"               = "kvar";
 "Item %lu of %lu"         = "Objekt %lu av %lu";
+"Show transfer details"   = "Visa överföringsdetaljer";
+"Hide transfer details"   = "Dölj överföringsdetaljer";
+"(enter password)"        = "(ange lösenord)";
+"(saved — leave blank to reuse)" = "(sparat — lämna tomt för att återanvända)";

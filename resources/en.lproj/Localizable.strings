@@ -216,3 +216,7 @@
 "%@ of %@"                = "%@ of %@";
 "remaining"               = "remaining";
 "Item %lu of %lu"         = "Item %lu of %lu";
+"Show transfer details"   = "Show transfer details";
+"Hide transfer details"   = "Hide transfer details";
+"(enter password)"        = "(enter password)";
+"(saved — leave blank to reuse)" = "(saved — leave blank to reuse)";
