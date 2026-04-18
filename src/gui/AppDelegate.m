@@ -319,6 +319,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
 @property (nonatomic, strong) NSView *rowView;
 @property (nonatomic, strong) NSTextField *titleLabel;
 @property (nonatomic, strong) NSTextField *fileLabel;
+@property (nonatomic, strong) NSTextField *statsLabel;     /* "381 MB of 6.5 GB — 11.5 MB/s — 9 min" */
 @property (nonatomic, strong) NSProgressIndicator *spinner;
 @property (nonatomic, strong) NSButton *cancelButton;
 @property (atomic, assign) BOOL cancelled;
@@ -2267,49 +2268,76 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     self = [super init];
     if (!self) return nil;
 
-    _rowView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 440, 76)];
+    /* Mac-native file-operation row:
+     *   filename (primary, bold)                              [X]
+     *   ================  thin progress bar  ================
+     *   381 MB of 6.5 GB — 11.5 MB/s — 9 min remaining       (tertiary)
+     *
+     * Matches the visual rhythm of AirDrop / Finder-copy sheets. */
+    _rowView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 420, 58)];
     _rowView.translatesAutoresizingMaskIntoConstraints = NO;
 
     _titleLabel = [NSTextField labelWithString:L(@"Copying…")];
-    _titleLabel.font = [NSFont boldSystemFontOfSize:13];
+    _titleLabel.font = [NSFont systemFontOfSize:13 weight:NSFontWeightMedium];
+    _titleLabel.textColor = [NSColor labelColor];
+    _titleLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
     _titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [_titleLabel setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow - 1
+                                          forOrientation:NSLayoutConstraintOrientationHorizontal];
     [_rowView addSubview:_titleLabel];
 
+    /* fileLabel kept for legacy callers but hidden — stats go to statsLabel. */
     _fileLabel = [NSTextField labelWithString:@""];
-    _fileLabel.font = [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightRegular];
-    _fileLabel.textColor = [NSColor secondaryLabelColor];
-    _fileLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
-    _fileLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    _fileLabel.hidden = YES;
     [_rowView addSubview:_fileLabel];
+
+    _statsLabel = [NSTextField labelWithString:@""];
+    _statsLabel.font = [NSFont systemFontOfSize:11];
+    _statsLabel.textColor = [NSColor secondaryLabelColor];
+    _statsLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+    _statsLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [_rowView addSubview:_statsLabel];
 
     _spinner = [[NSProgressIndicator alloc] init];
     _spinner.style = NSProgressIndicatorStyleBar;
     _spinner.indeterminate = YES;
+    _spinner.controlSize = NSControlSizeSmall;
     _spinner.translatesAutoresizingMaskIntoConstraints = NO;
     [_rowView addSubview:_spinner];
 
-    _cancelButton = [NSButton buttonWithTitle:L(@"Cancel") target:self action:@selector(cancel:)];
-    _cancelButton.bezelStyle = NSBezelStyleRounded;
-    _cancelButton.controlSize = NSControlSizeSmall;
+    /* Borderless X button, circular — matches macOS Notification/AirDrop close. */
+    _cancelButton = [NSButton buttonWithImage:
+        [NSImage imageWithSystemSymbolName:@"xmark.circle.fill"
+                  accessibilityDescription:L(@"Cancel")]
+                                      target:self
+                                      action:@selector(cancel:)];
+    _cancelButton.bezelStyle = NSBezelStyleInline;
+    _cancelButton.bordered = NO;
+    _cancelButton.imagePosition = NSImageOnly;
+    _cancelButton.contentTintColor = [NSColor secondaryLabelColor];
+    _cancelButton.toolTip = L(@"Cancel");
     _cancelButton.translatesAutoresizingMaskIntoConstraints = NO;
     [_rowView addSubview:_cancelButton];
 
     [NSLayoutConstraint activateConstraints:@[
-        [_titleLabel.leadingAnchor constraintEqualToAnchor:_rowView.leadingAnchor constant:12],
-        [_titleLabel.topAnchor constraintEqualToAnchor:_rowView.topAnchor constant:6],
+        [_cancelButton.trailingAnchor  constraintEqualToAnchor:_rowView.trailingAnchor constant:-8],
+        [_cancelButton.topAnchor       constraintEqualToAnchor:_rowView.topAnchor constant:6],
+        [_cancelButton.widthAnchor     constraintEqualToConstant:18],
+        [_cancelButton.heightAnchor    constraintEqualToConstant:18],
 
-        [_cancelButton.trailingAnchor constraintEqualToAnchor:_rowView.trailingAnchor constant:-8],
-        [_cancelButton.centerYAnchor constraintEqualToAnchor:_titleLabel.centerYAnchor],
+        [_titleLabel.leadingAnchor     constraintEqualToAnchor:_rowView.leadingAnchor constant:12],
+        [_titleLabel.trailingAnchor    constraintEqualToAnchor:_cancelButton.leadingAnchor constant:-8],
+        [_titleLabel.topAnchor         constraintEqualToAnchor:_rowView.topAnchor constant:6],
 
-        [_fileLabel.leadingAnchor constraintEqualToAnchor:_rowView.leadingAnchor constant:12],
-        [_fileLabel.trailingAnchor constraintEqualToAnchor:_cancelButton.leadingAnchor constant:-8],
-        [_fileLabel.topAnchor constraintEqualToAnchor:_titleLabel.bottomAnchor constant:2],
+        [_spinner.leadingAnchor        constraintEqualToAnchor:_rowView.leadingAnchor constant:12],
+        [_spinner.trailingAnchor       constraintEqualToAnchor:_rowView.trailingAnchor constant:-12],
+        [_spinner.topAnchor            constraintEqualToAnchor:_titleLabel.bottomAnchor constant:6],
+        [_spinner.heightAnchor         constraintEqualToConstant:6],
 
-        [_spinner.leadingAnchor constraintEqualToAnchor:_rowView.leadingAnchor constant:12],
-        [_spinner.trailingAnchor constraintEqualToAnchor:_rowView.trailingAnchor constant:-12],
-        [_spinner.topAnchor constraintEqualToAnchor:_fileLabel.bottomAnchor constant:4],
-        [_spinner.bottomAnchor constraintEqualToAnchor:_rowView.bottomAnchor constant:-8],
-        [_spinner.heightAnchor constraintEqualToConstant:10],
+        [_statsLabel.leadingAnchor     constraintEqualToAnchor:_rowView.leadingAnchor constant:12],
+        [_statsLabel.trailingAnchor    constraintEqualToAnchor:_rowView.trailingAnchor constant:-12],
+        [_statsLabel.topAnchor         constraintEqualToAnchor:_spinner.bottomAnchor constant:4],
+        [_statsLabel.bottomAnchor      constraintEqualToAnchor:_rowView.bottomAnchor constant:-6],
     ]];
 
     return self;
@@ -2434,10 +2462,10 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
 
             NSString *name = names[i];
             dispatch_async(dispatch_get_main_queue(), ^{
-                self.fileLabel.stringValue = [NSString stringWithFormat:@"(%lu/%lu) %@",
-                                              (unsigned long)(i + 1),
-                                              (unsigned long)paths.count,
-                                              name];
+                self.titleLabel.stringValue = name;
+                self.statsLabel.stringValue = [NSString stringWithFormat:L(@"Item %lu of %lu"),
+                                                (unsigned long)(i + 1),
+                                                (unsigned long)paths.count];
             });
 
             NSString *from = paths[i];
@@ -5663,8 +5691,10 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
                  fromLister:(ListerWindowController *)src
                  toLocalDir:(NSString *)destDir {
     ProgressSheetController *job = [[ProgressSheetController alloc] init];
-    job.titleLabel.stringValue = [NSString stringWithFormat:L(@"Downloading from %@"),
-                                    src.remoteLabel ?: @"remote"];
+    job.titleLabel.stringValue = names.count == 1 ? names.firstObject
+        : [NSString stringWithFormat:L(@"%lu items from %@"),
+           (unsigned long)names.count, src.remoteLabel ?: @"remote"];
+    job.statsLabel.stringValue = L(@"Preparing…");
     [job.spinner startAnimation:nil];
     [[JobsPanelController shared] addJobRow:job.rowView];
 
@@ -5691,9 +5721,12 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     for (NSString *name in names) {
         i++;
         NSString *remotePath = [src.currentPath stringByAppendingPathComponent:name];
-        NSString *rowLabel = [NSString stringWithFormat:@"(%lu/%lu) %@",
-                               (unsigned long)i, (unsigned long)total, name];
-        job.fileLabel.stringValue = rowLabel;
+        /* Title shows the filename for single-file runs, or "(k/N) name" for
+         * multi-file. Stats line holds the numbers. */
+        NSString *titleValue = total == 1 ? name
+            : [NSString stringWithFormat:@"(%lu/%lu) %@",
+               (unsigned long)i, (unsigned long)total, name];
+        job.titleLabel.stringValue = titleValue;
         NSTask *task = [IDOpusRclone copyFromRemote:src.remoteSpec
                           remotePath:remotePath
                              toLocal:destDir
@@ -5718,11 +5751,14 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
             }
             job.spinner.doubleValue = pctVal;
 
-            NSMutableString *status = [NSMutableString stringWithFormat:
-                @"%@ · %@ / %@", rowLabel, done, tot];
-            if (speed.length) [status appendFormat:@" · %@", speed];
-            if (eta.length)   [status appendFormat:@" · ETA %@", eta];
-            job.fileLabel.stringValue = status;
+            /* Format: "381 MB of 6.5 GB — 11.5 MB/s — 9 min remaining" —
+             * matches Finder/AirDrop phrasing. Em-dash separators. */
+            NSMutableString *stats = [NSMutableString string];
+            [stats appendFormat:L(@"%@ of %@"), done, tot];
+            if (speed.length) [stats appendFormat:@" — %@", speed];
+            if (eta.length)   [stats appendFormat:@" — %@ %@",
+                               eta, L(@"remaining")];
+            job.statsLabel.stringValue = stats;
         } completion:^(int status) {
             if (status != 0) anyFailed = YES;
             if (--remaining == 0) {

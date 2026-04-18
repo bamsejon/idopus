@@ -210,3 +210,7 @@
 "SAVED"                   = "SPARADE";
 "Scanning…"               = "Söker…";
 "No saved connections yet" = "Inga sparade anslutningar än";
+"%lu items from %@"       = "%lu objekt från %@";
+"%@ of %@"                = "%@ av %@";
+"remaining"               = "kvar";
+"Item %lu of %lu"         = "Objekt %lu av %lu";

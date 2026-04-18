@@ -212,3 +212,7 @@
 "SAVED"                   = "SAVED";
 "Scanning…"               = "Scanning…";
 "No saved connections yet" = "No saved connections yet";
+"%lu items from %@"       = "%lu items from %@";
+"%@ of %@"                = "%@ of %@";
+"remaining"               = "remaining";
+"Item %lu of %lu"         = "Item %lu of %lu";
