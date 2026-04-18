@@ -5534,15 +5534,22 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     if (fabs(dx) < 0.5 && fabs(dy) < 0.5) return;
 
     _suppressSnap = YES;
+    /* Batch the sibling move into the same screen refresh as the user-driven
+     * window. Without this wrap, setFrame schedules a redraw on the next
+     * runloop pass, so the sibling visibly lags one frame behind the mouse.
+     * setFrameOrigin is the cheapest move primitive — no size recompute, no
+     * invalidation pass. */
+    NSDisableScreenUpdates();
     for (ListerWindowController *other in visible) {
         if (other == lw) continue;
         NSRect f = other.window.frame;
-        f.origin.x += dx;
-        f.origin.y += dy;
-        [other.window setFrame:f display:YES animate:NO];
+        NSPoint p = NSMakePoint(f.origin.x + dx, f.origin.y + dy);
+        [other.window setFrameOrigin:p];
+        f.origin = p;
         _lastListerFrames[[NSValue valueWithNonretainedObject:other.window]] =
             [NSValue valueWithRect:f];
     }
+    NSEnableScreenUpdates();
     _suppressSnap = NO;
 }
 
