@@ -5509,6 +5509,16 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     [job.spinner startAnimation:nil];
     [[JobsPanelController shared] addJobRow:job.rowView];
 
+    /* Regex cached once — matches rclone's `Transferred:` progress line, e.g.
+     *   Transferred:       64 MiB / 128 MiB, 50%, 10.23 MiB/s, ETA 6s
+     * Groups: 1=done bytes+unit, 2=total bytes+unit, 3=pct, 4=speed, 5=ETA */
+    static NSRegularExpression *rxProgress = nil;
+    static dispatch_once_t onceTok; dispatch_once(&onceTok, ^{
+        rxProgress = [NSRegularExpression regularExpressionWithPattern:
+            @"Transferred:\\s+([\\d.]+\\s*\\S+)\\s*/\\s*([\\d.]+\\s*\\S+),\\s*(\\d+)%,?\\s*([\\d.]+\\s*\\S+/s)?(?:,\\s*ETA\\s+(\\S+))?"
+            options:0 error:nil];
+    });
+
     __block NSUInteger remaining = names.count;
     __block BOOL anyFailed = NO;
     NSUInteger total = names.count;
@@ -5516,13 +5526,38 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     for (NSString *name in names) {
         i++;
         NSString *remotePath = [src.currentPath stringByAppendingPathComponent:name];
-        job.fileLabel.stringValue = [NSString stringWithFormat:@"(%lu/%lu) %@",
-                                       (unsigned long)i, (unsigned long)total, name];
+        NSString *rowLabel = [NSString stringWithFormat:@"(%lu/%lu) %@",
+                               (unsigned long)i, (unsigned long)total, name];
+        job.fileLabel.stringValue = rowLabel;
         [IDOpusRclone copyFromRemote:src.remoteSpec
                           remotePath:remotePath
                              toLocal:destDir
                             progress:^(NSString *line) {
-            job.fileLabel.stringValue = line;
+            NSTextCheckingResult *m = [rxProgress firstMatchInString:line
+                options:0 range:NSMakeRange(0, line.length)];
+            if (!m) return;
+            NSString *done  = [line substringWithRange:[m rangeAtIndex:1]];
+            NSString *tot   = [line substringWithRange:[m rangeAtIndex:2]];
+            NSString *pct   = [line substringWithRange:[m rangeAtIndex:3]];
+            NSString *speed = [m rangeAtIndex:4].location != NSNotFound
+                ? [line substringWithRange:[m rangeAtIndex:4]] : @"";
+            NSString *eta   = [m rangeAtIndex:5].location != NSNotFound
+                ? [line substringWithRange:[m rangeAtIndex:5]] : @"";
+
+            double pctVal = pct.doubleValue;
+            if (job.spinner.indeterminate) {
+                [job.spinner stopAnimation:nil];
+                job.spinner.indeterminate = NO;
+                job.spinner.minValue = 0;
+                job.spinner.maxValue = 100;
+            }
+            job.spinner.doubleValue = pctVal;
+
+            NSMutableString *status = [NSMutableString stringWithFormat:
+                @"%@ · %@ / %@", rowLabel, done, tot];
+            if (speed.length) [status appendFormat:@" · %@", speed];
+            if (eta.length)   [status appendFormat:@" · ETA %@", eta];
+            job.fileLabel.stringValue = status;
         } completion:^(int status) {
             if (status != 0) anyFailed = YES;
             if (--remaining == 0) {
