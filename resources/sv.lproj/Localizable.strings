@@ -228,3 +228,8 @@
 "Elapsed:"                = "Förflutet:";
 "Status:"                 = "Status:";
 "Running"                 = "Kör";
+"Clear all saved"         = "Rensa alla sparade";
+"Clear all saved connections?" = "Rensa alla sparade anslutningar?";
+"This removes every entry under SAVED, including stored passwords. Cannot be undone." = "Tar bort alla poster under SPARADE, inklusive sparade lösenord. Kan inte ångras.";
+"Clear"                   = "Rensa";
+"(missing host — right-click to remove)" = "(saknar värd — högerklicka för att ta bort)";

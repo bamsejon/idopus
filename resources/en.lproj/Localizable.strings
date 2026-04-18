@@ -230,3 +230,8 @@
 "Elapsed:"                = "Elapsed:";
 "Status:"                 = "Status:";
 "Running"                 = "Running";
+"Clear all saved"         = "Clear all saved";
+"Clear all saved connections?" = "Clear all saved connections?";
+"This removes every entry under SAVED, including stored passwords. Cannot be undone." = "This removes every entry under SAVED, including stored passwords. Cannot be undone.";
+"Clear"                   = "Clear";
+"(missing host — right-click to remove)" = "(missing host — right-click to remove)";

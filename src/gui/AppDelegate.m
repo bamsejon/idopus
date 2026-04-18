@@ -6486,6 +6486,10 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     /* Context menu for Saved rows → Remove. */
     NSMenu *sideMenu = [[NSMenu alloc] init];
     [sideMenu addItemWithTitle:L(@"Remove") action:@selector(removeSavedAction:) keyEquivalent:@""].target = self;
+    [sideMenu addItem:[NSMenuItem separatorItem]];
+    [sideMenu addItemWithTitle:L(@"Clear all saved")
+                        action:@selector(clearAllSavedAction:)
+                 keyEquivalent:@""].target = self;
     _sideTable.menu = sideMenu;
     sideScroll.documentView = _sideTable;
     [c addSubview:sideScroll];
@@ -6572,17 +6576,27 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
 
 + (NSArray<NSDictionary *> *)savedConnections {
     NSArray *raw = [[NSUserDefaults standardUserDefaults] arrayForKey:@"sftpSavedConnections"] ?: @[];
-    /* Filter out corrupt entries (missing host) that older builds may have
-     * written — they render as a bare "SMB" / "SFTP" row and can't be used. */
+    /* Filter out corrupt entries that render as a bare "SMB" / "SFTP" row
+     * and can't be used: no host string, whitespace-only host, or an entry
+     * that's not even a dictionary. */
     NSMutableArray *clean = [NSMutableArray array];
-    for (NSDictionary *c in raw) {
-        NSString *h = c[@"host"];
-        if ([h isKindOfClass:[NSString class]] && h.length) [clean addObject:c];
+    NSCharacterSet *ws = [NSCharacterSet whitespaceAndNewlineCharacterSet];
+    for (id c in raw) {
+        if (![c isKindOfClass:[NSDictionary class]]) continue;
+        id h = ((NSDictionary *)c)[@"host"];
+        if (![h isKindOfClass:[NSString class]]) continue;
+        NSString *trimmed = [(NSString *)h stringByTrimmingCharactersInSet:ws];
+        if (trimmed.length == 0) continue;
+        [clean addObject:c];
     }
     if (clean.count != raw.count) {
         [[NSUserDefaults standardUserDefaults] setObject:clean forKey:@"sftpSavedConnections"];
     }
     return clean;
+}
+
++ (void)clearAllSavedConnections {
+    [[NSUserDefaults standardUserDefaults] removeObjectForKey:@"sftpSavedConnections"];
 }
 
 + (void)rememberConnection:(NSDictionary *)conn {
@@ -7038,15 +7052,24 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
             tf.font = [NSFont systemFontOfSize:12];
             tf.textColor = [NSColor tertiaryLabelColor];
         } else {
-            NSString *user = d[@"user"] ?: @"";
-            NSString *host = d[@"host"] ?: @"";
-            NSString *proto = d[@"protocol"] ?: @"sftp";
+            NSString *user = [d[@"user"] isKindOfClass:[NSString class]] ? d[@"user"] : @"";
+            NSString *host = [d[@"host"] isKindOfClass:[NSString class]] ? d[@"host"] : @"";
+            NSString *proto = [d[@"protocol"] isKindOfClass:[NSString class]] ? d[@"protocol"] : @"sftp";
             NSString *base = user.length ? [NSString stringWithFormat:@"%@@%@", user, host] : host;
-            NSString *disp = [NSString stringWithFormat:@"%@  %@",
-                               [proto uppercaseString], base];
+            NSString *disp;
+            if (!base.length) {
+                /* Corrupt row that somehow survived the filter — render it
+                 * visibly so the user can right-click → Remove instead of
+                 * wondering why a bare protocol badge is floating there. */
+                disp = [NSString stringWithFormat:@"%@  %@",
+                         [proto uppercaseString], L(@"(missing host — right-click to remove)")];
+                tf.textColor = [NSColor systemRedColor];
+            } else {
+                disp = [NSString stringWithFormat:@"%@  %@", [proto uppercaseString], base];
+                tf.textColor = [NSColor labelColor];
+            }
             tf.stringValue = disp;
             tf.font = [NSFont systemFontOfSize:12];
-            tf.textColor = [NSColor labelColor];
         }
     }
     cell.textField = tf;
@@ -7117,6 +7140,18 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
         _passField.placeholderString = L(@"(saved — leave blank to reuse)");
     }
     [self.window makeFirstResponder:_passField];
+}
+
+- (void)clearAllSavedAction:(id)sender {
+    NSAlert *alert = [[NSAlert alloc] init];
+    alert.messageText = L(@"Clear all saved connections?");
+    alert.informativeText = L(@"This removes every entry under SAVED, including stored passwords. Cannot be undone.");
+    alert.alertStyle = NSAlertStyleWarning;
+    [alert addButtonWithTitle:L(@"Clear")];
+    [alert addButtonWithTitle:L(@"Cancel")];
+    if ([alert runModal] != NSAlertFirstButtonReturn) return;
+    [ConnectDialogController clearAllSavedConnections];
+    [self rebuildSidebar];
 }
 
 - (void)removeSavedAction:(id)sender {
