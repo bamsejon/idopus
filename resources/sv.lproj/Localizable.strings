@@ -170,3 +170,15 @@
 "KB/s"                    = "KB/s";
 "Extra:"                  = "Extra:";
 "extra rsync flags"       = "extra rsync-flaggor";
+"Click any segment to jump there" = "Klicka på ett segment för att hoppa dit";
+"Sync with rsync"         = "Synka med rsync";
+"Source / Dest can be local or remote (user@host:/path). Uses /usr/bin/rsync — existing SSH keys in ~/.ssh/ apply to remote targets." = "Källa / Mål kan vara lokala eller fjärr (user@host:/path). Använder /usr/bin/rsync — SSH-nycklar i ~/.ssh/ gäller för fjärrmål.";
+"%lu selected item(s) in %@" = "%lu markerade objekt i %@";
+"Source and destination are required." = "Källa och mål krävs.";
+"Save Profile"            = "Spara profil";
+"Profile needs a name."   = "Profilen behöver ett namn.";
+"Profiles can't be saved from a selection. Run the sync now, or clear the selection and reopen the dialog to save a folder-level profile." = "Profiler kan inte sparas från en markering. Kör synken nu, eller avmarkera och öppna dialogen igen för att spara en mappbaserad profil.";
+"Add Sync Profile"        = "Lägg till synk-profil";
+"Save a reusable sync definition. Run it later from Functions → Sync." = "Spara en återanvändbar synkdefinition. Kör den senare från Funktioner → Synka.";
+"Name, source and destination are all required." = "Namn, källa och mål är alla obligatoriska.";
+"Run"                     = "Kör";

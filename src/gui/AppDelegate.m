@@ -209,9 +209,57 @@ typedef NS_ENUM(NSInteger, ListerState) {
 
 @class ListerDataSource;
 
+/* Trampoline used by the rsync dialog's three buttons to stop a modal run
+ * with distinct codes. Kept lightweight so dialogs don't need their own
+ * controller class. */
+@interface IDOpusDialogHandler : NSObject
+@end
+@implementation IDOpusDialogHandler
+- (IBAction)stopCancel:(id)s { [NSApp stopModalWithCode:0]; }
+- (IBAction)stopRun:(id)s    { [NSApp stopModalWithCode:1]; }
+- (IBAction)stopSave:(id)s   { [NSApp stopModalWithCode:2]; }
+@end
+
+/* NSPathControl subclass with a hover highlight so the breadcrumb actually
+ * looks clickable. Uses an NSTrackingArea to toggle a subtle background tint
+ * when the pointer is inside, and sets a pointing-hand cursor. */
+@interface HoverPathControl : NSPathControl
+@end
+
+@implementation HoverPathControl {
+    NSTrackingArea *_trackingArea;
+}
+- (instancetype)initWithFrame:(NSRect)f {
+    self = [super initWithFrame:f];
+    if (!self) return nil;
+    self.wantsLayer = YES;
+    self.layer.cornerRadius = 4;
+    self.toolTip = NSLocalizedString(@"Click any segment to jump there", nil);
+    return self;
+}
+- (void)updateTrackingAreas {
+    [super updateTrackingAreas];
+    if (_trackingArea) [self removeTrackingArea:_trackingArea];
+    _trackingArea = [[NSTrackingArea alloc] initWithRect:self.bounds
+        options:(NSTrackingMouseEnteredAndExited | NSTrackingActiveInKeyWindow | NSTrackingInVisibleRect | NSTrackingCursorUpdate)
+        owner:self userInfo:nil];
+    [self addTrackingArea:_trackingArea];
+}
+- (void)mouseEntered:(NSEvent *)e {
+    self.layer.backgroundColor = [NSColor.selectedControlColor colorWithAlphaComponent:0.18].CGColor;
+}
+- (void)mouseExited:(NSEvent *)e {
+    self.layer.backgroundColor = NSColor.controlBackgroundColor.CGColor;
+}
+- (void)cursorUpdate:(NSEvent *)e {
+    [[NSCursor pointingHandCursor] set];
+}
+@end
+
 /* Forward-declared: used inside ListerWindowController before its own
  * @implementation. Full @interface + @implementation follow below. */
-@interface ProgressSheetController : NSWindowController
+@interface ProgressSheetController : NSObject
+@property (nonatomic, strong) NSView *rowView;
 @property (nonatomic, strong) NSTextField *titleLabel;
 @property (nonatomic, strong) NSTextField *fileLabel;
 @property (nonatomic, strong) NSProgressIndicator *spinner;
@@ -223,6 +271,17 @@ typedef NS_ENUM(NSInteger, ListerState) {
               destDir:(NSString *)destDir
           sourceWindow:(NSWindow *)srcWin
            completion:(void (^)(NSArray<NSString *> *failed))completion;
+@end
+
+/* Shared panel that displays all in-flight file operations as rows. Replaces
+ * per-Lister progress sheets so the Listers stay usable while copies run,
+ * and multiple parallel jobs live in a single window instead of stacking up
+ * as modal sheets across different Listers. */
+@interface JobsPanelController : NSWindowController
+@property (nonatomic, strong) NSStackView *stack;
++ (instancetype)shared;
+- (void)addJobRow:(NSView *)row;
+- (void)removeJobRow:(NSView *)row;
 @end
 
 @interface ListerWindowController : NSWindowController <NSWindowDelegate, QLPreviewPanelDataSource, QLPreviewPanelDelegate, NSMenuDelegate, NSSearchFieldDelegate>
@@ -670,7 +729,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
     [content addSubview:_pathField];
 
     /* Path control (breadcrumbs — default) */
-    _pathControl = [[NSPathControl alloc] init];
+    _pathControl = [[HoverPathControl alloc] init];
     _pathControl.URL = [NSURL fileURLWithPath:_currentPath];
     _pathControl.pathStyle = NSPathStyleStandard;
     _pathControl.backgroundColor = [NSColor controlBackgroundColor];
@@ -1645,28 +1704,40 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
 
 - (void)applyStateStyling {
     NSString *text;
-    NSColor *fg, *bg;
+    NSColor *fg, *bg, *borderColor;
+    CGFloat borderWidth = 2.0;
     switch (_state) {
         case ListerStateSource:
             text = L(@"SOURCE");
             fg = [NSColor whiteColor];
             bg = [NSColor systemBlueColor];
+            borderColor = [NSColor systemBlueColor];
             break;
         case ListerStateDest:
             text = L(@"DEST");
             fg = [NSColor whiteColor];
             bg = [NSColor systemOrangeColor];
+            borderColor = [NSColor systemOrangeColor];
             break;
         case ListerStateOff:
         default:
             text = L(@"OFF");
             fg = [NSColor secondaryLabelColor];
             bg = [NSColor clearColor];
+            borderColor = [NSColor clearColor];
+            borderWidth = 0.0;
             break;
     }
     _stateLabel.stringValue = text;
     _stateLabel.textColor = fg;
     _stateLabel.backgroundColor = bg;
+
+    /* Paint the content-view border to match — gives a clear at-a-glance signal
+     * of which Lister is SOURCE vs DEST without having to read the corner tag. */
+    NSView *cv = self.window.contentView;
+    cv.wantsLayer = YES;
+    cv.layer.borderWidth = borderWidth;
+    cv.layer.borderColor = borderColor.CGColor;
 }
 
 #pragma mark NSWindowDelegate
@@ -1830,53 +1901,52 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
 @implementation ProgressSheetController
 
 - (instancetype)init {
-    NSRect frame = NSMakeRect(0, 0, 440, 120);
-    NSWindow *w = [[NSWindow alloc] initWithContentRect:frame
-                                              styleMask:NSWindowStyleMaskTitled
-                                                backing:NSBackingStoreBuffered
-                                                  defer:NO];
-    self = [super initWithWindow:w];
+    self = [super init];
     if (!self) return nil;
 
-    NSView *content = w.contentView;
-    _titleLabel = [NSTextField labelWithString:@"Copying…"];
+    _rowView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 440, 76)];
+    _rowView.translatesAutoresizingMaskIntoConstraints = NO;
+
+    _titleLabel = [NSTextField labelWithString:L(@"Copying…")];
     _titleLabel.font = [NSFont boldSystemFontOfSize:13];
     _titleLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    [content addSubview:_titleLabel];
+    [_rowView addSubview:_titleLabel];
 
     _fileLabel = [NSTextField labelWithString:@""];
     _fileLabel.font = [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightRegular];
     _fileLabel.textColor = [NSColor secondaryLabelColor];
     _fileLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
     _fileLabel.translatesAutoresizingMaskIntoConstraints = NO;
-    [content addSubview:_fileLabel];
+    [_rowView addSubview:_fileLabel];
 
     _spinner = [[NSProgressIndicator alloc] init];
     _spinner.style = NSProgressIndicatorStyleBar;
     _spinner.indeterminate = YES;
     _spinner.translatesAutoresizingMaskIntoConstraints = NO;
-    [content addSubview:_spinner];
+    [_rowView addSubview:_spinner];
 
-    _cancelButton = [NSButton buttonWithTitle:@"Cancel" target:self action:@selector(cancel:)];
-    _cancelButton.keyEquivalent = @"\033";  /* Esc */
+    _cancelButton = [NSButton buttonWithTitle:L(@"Cancel") target:self action:@selector(cancel:)];
+    _cancelButton.bezelStyle = NSBezelStyleRounded;
+    _cancelButton.controlSize = NSControlSizeSmall;
     _cancelButton.translatesAutoresizingMaskIntoConstraints = NO;
-    [content addSubview:_cancelButton];
+    [_rowView addSubview:_cancelButton];
 
     [NSLayoutConstraint activateConstraints:@[
-        [_titleLabel.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:16],
-        [_titleLabel.topAnchor constraintEqualToAnchor:content.topAnchor constant:12],
-        [_titleLabel.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-16],
+        [_titleLabel.leadingAnchor constraintEqualToAnchor:_rowView.leadingAnchor constant:12],
+        [_titleLabel.topAnchor constraintEqualToAnchor:_rowView.topAnchor constant:6],
 
-        [_fileLabel.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:16],
-        [_fileLabel.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-16],
-        [_fileLabel.topAnchor constraintEqualToAnchor:_titleLabel.bottomAnchor constant:4],
+        [_cancelButton.trailingAnchor constraintEqualToAnchor:_rowView.trailingAnchor constant:-8],
+        [_cancelButton.centerYAnchor constraintEqualToAnchor:_titleLabel.centerYAnchor],
 
-        [_spinner.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:16],
-        [_spinner.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-16],
-        [_spinner.topAnchor constraintEqualToAnchor:_fileLabel.bottomAnchor constant:8],
+        [_fileLabel.leadingAnchor constraintEqualToAnchor:_rowView.leadingAnchor constant:12],
+        [_fileLabel.trailingAnchor constraintEqualToAnchor:_cancelButton.leadingAnchor constant:-8],
+        [_fileLabel.topAnchor constraintEqualToAnchor:_titleLabel.bottomAnchor constant:2],
 
-        [_cancelButton.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-16],
-        [_cancelButton.bottomAnchor constraintEqualToAnchor:content.bottomAnchor constant:-12],
+        [_spinner.leadingAnchor constraintEqualToAnchor:_rowView.leadingAnchor constant:12],
+        [_spinner.trailingAnchor constraintEqualToAnchor:_rowView.trailingAnchor constant:-12],
+        [_spinner.topAnchor constraintEqualToAnchor:_fileLabel.bottomAnchor constant:4],
+        [_spinner.bottomAnchor constraintEqualToAnchor:_rowView.bottomAnchor constant:-8],
+        [_spinner.heightAnchor constraintEqualToConstant:10],
     ]];
 
     return self;
@@ -1885,7 +1955,7 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
 - (void)cancel:(id)sender {
     self.cancelled = YES;
     _cancelButton.enabled = NO;
-    _titleLabel.stringValue = @"Cancelling…";
+    _titleLabel.stringValue = L(@"Cancelling…");
 }
 
 /* Returns: 1=Replace, 2=Skip, 3=Keep Both, 4=Cancel-all, 5=Merge.
@@ -1981,10 +2051,10 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
         sourceWindow:(NSWindow *)srcWin
           completion:(void (^)(NSArray<NSString *> *))completion {
 
-    self.titleLabel.stringValue = isMove ? @"Moving…" : @"Copying…";
+    (void)srcWin;
+    self.titleLabel.stringValue = isMove ? L(@"Moving…") : L(@"Copying…");
     [self.spinner startAnimation:nil];
-
-    [srcWin beginSheet:self.window completionHandler:nil];
+    [[JobsPanelController shared] addJobRow:self.rowView];
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
         NSFileManager *fm = [NSFileManager defaultManager];
@@ -2068,10 +2138,108 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
 
         dispatch_async(dispatch_get_main_queue(), ^{
             [self.spinner stopAnimation:nil];
-            [srcWin endSheet:self.window];
+            [[JobsPanelController shared] removeJobRow:self.rowView];
             if (completion) completion(failed);
         });
     });
+}
+
+@end
+
+#pragma mark - Jobs Panel
+
+@implementation JobsPanelController
+
++ (instancetype)shared {
+    static JobsPanelController *s = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ s = [[JobsPanelController alloc] init]; });
+    return s;
+}
+
+- (instancetype)init {
+    NSRect frame = NSMakeRect(0, 0, 460, 80);
+    NSWindowStyleMask style = NSWindowStyleMaskTitled |
+                               NSWindowStyleMaskClosable |
+                               NSWindowStyleMaskUtilityWindow |
+                               NSWindowStyleMaskNonactivatingPanel;
+    NSPanel *panel = [[NSPanel alloc] initWithContentRect:frame
+                                                styleMask:style
+                                                  backing:NSBackingStoreBuffered
+                                                    defer:NO];
+    panel.title = L(@"File operations");
+    panel.hidesOnDeactivate = NO;
+    panel.becomesKeyOnlyIfNeeded = YES;
+    panel.releasedWhenClosed = NO;
+
+    self = [super initWithWindow:panel];
+    if (!self) return nil;
+
+    NSView *content = panel.contentView;
+
+    _stack = [[NSStackView alloc] init];
+    _stack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    _stack.alignment = NSLayoutAttributeLeading;
+    _stack.distribution = NSStackViewDistributionGravityAreas;
+    _stack.spacing = 8;
+    _stack.edgeInsets = NSEdgeInsetsMake(8, 8, 8, 8);
+    _stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [content addSubview:_stack];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [_stack.leadingAnchor  constraintEqualToAnchor:content.leadingAnchor],
+        [_stack.trailingAnchor constraintEqualToAnchor:content.trailingAnchor],
+        [_stack.topAnchor      constraintEqualToAnchor:content.topAnchor],
+        [_stack.bottomAnchor   constraintEqualToAnchor:content.bottomAnchor],
+    ]];
+    return self;
+}
+
+- (void)addJobRow:(NSView *)row {
+    NSBox *divider = nil;
+    if (_stack.arrangedSubviews.count > 0) {
+        divider = [[NSBox alloc] init];
+        divider.boxType = NSBoxSeparator;
+        divider.translatesAutoresizingMaskIntoConstraints = NO;
+        [_stack addArrangedSubview:divider];
+        [divider.widthAnchor constraintEqualToAnchor:_stack.widthAnchor constant:-16].active = YES;
+    }
+    [_stack addArrangedSubview:row];
+    [row.widthAnchor constraintEqualToAnchor:_stack.widthAnchor constant:-16].active = YES;
+    [self.window setContentSize:[self fittingSize]];
+    [self.window.contentView layoutSubtreeIfNeeded];
+    [self.window center];
+    [self.window orderFront:nil];
+}
+
+- (void)removeJobRow:(NSView *)row {
+    NSUInteger idx = [_stack.arrangedSubviews indexOfObject:row];
+    if (idx == NSNotFound) return;
+    /* Remove trailing separator too if present, else the leading one. */
+    if (idx + 1 < _stack.arrangedSubviews.count) {
+        NSView *sep = _stack.arrangedSubviews[idx + 1];
+        if ([sep isKindOfClass:[NSBox class]]) [sep removeFromSuperview];
+    } else if (idx > 0) {
+        NSView *sep = _stack.arrangedSubviews[idx - 1];
+        if ([sep isKindOfClass:[NSBox class]]) [sep removeFromSuperview];
+    }
+    [row removeFromSuperview];
+    if (_stack.arrangedSubviews.count == 0) {
+        [self.window orderOut:nil];
+    } else {
+        [self.window setContentSize:[self fittingSize]];
+    }
+}
+
+- (NSSize)fittingSize {
+    CGFloat height = 16;  /* insets */
+    for (NSView *v in _stack.arrangedSubviews) {
+        CGFloat h = [v fittingSize].height;
+        if (h <= 0) h = [v isKindOfClass:[NSBox class]] ? 1 : 76;
+        height += h + 8;
+    }
+    if (height < 80) height = 80;
+    return NSMakeSize(460, height);
 }
 
 @end
@@ -2104,10 +2272,10 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
                                                   backing:NSBackingStoreBuffered
                                                     defer:NO];
     panel.title = @"Buttons";
-    panel.floatingPanel = YES;
-    panel.hidesOnDeactivate = YES;   /* only float while iDOpus is the active app */
-    panel.level = NSFloatingWindowLevel;
+    /* Attached to the SOURCE Lister as a child window — no floating/level tricks.
+     * Non-activating so clicking a button doesn't steal focus from the Lister. */
     panel.becomesKeyOnlyIfNeeded = YES;
+    panel.hidesOnDeactivate = NO;
     panel.contentMinSize = NSMakeSize(70, 200);
 
     self = [super initWithWindow:panel];
@@ -2783,18 +2951,18 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
 
         _buttonBankPanel = [[ButtonBankPanelController alloc] initWithAppDelegate:self];
         [_buttonBankPanel positionBetweenLeftFrame:leftFrame rightFrame:rightFrame];
-        if (showBank) [_buttonBankPanel.window orderFront:nil];
-
         [right.window makeKeyAndOrderFront:nil];
+        [self attachButtonBankToSource];
+        if (showBank) [_buttonBankPanel.window orderFront:nil];
     } else {
         NSRect single = NSMakeRect(x, y, totalW, h);
         ListerWindowController *one = [self newListerWindow:leftPath frame:single];
         [one.window setFrame:single display:YES animate:NO];
 
         _buttonBankPanel = [[ButtonBankPanelController alloc] initWithAppDelegate:self];
-        if (showBank) [_buttonBankPanel.window orderFront:nil];
-
         [one.window makeKeyAndOrderFront:nil];
+        [self attachButtonBankToSource];
+        if (showBank) [_buttonBankPanel.window orderFront:nil];
     }
 }
 
@@ -3081,12 +3249,15 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
             [prevSource setState:ListerStateOff];
         }
     }
+
+    [self attachButtonBankToSource];
 }
 
 - (void)listerClosing:(ListerWindowController *)ctrl {
     if (_activeSource == ctrl) _activeSource = nil;
     if (_activeDest == ctrl) _activeDest = nil;
     [_listerControllers removeObject:ctrl];
+    [self attachButtonBankToSource];
 }
 
 - (void)showPreferencesAction:(id)sender {
@@ -3331,7 +3502,24 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     if (!_buttonBankPanel) return;
     NSWindow *w = _buttonBankPanel.window;
     if (w.isVisible) [w orderOut:nil];
-    else             [w orderFront:nil];
+    else {
+        [self attachButtonBankToSource];
+        if (!w.isVisible) [w orderFront:nil];
+    }
+}
+
+/* Re-parent the Button Bank panel as a child window of the current SOURCE.
+ * Must run every time the SOURCE changes so the bank tracks move/minimize/z-order
+ * with the Lister it serves. No-ops cleanly if no SOURCE is available yet. */
+- (void)attachButtonBankToSource {
+    if (!_buttonBankPanel) return;
+    NSWindow *bank = _buttonBankPanel.window;
+    ListerWindowController *host = _activeSource ?: _activeDest ?: _listerControllers.lastObject;
+    NSWindow *newParent = host.window;
+    NSWindow *oldParent = bank.parentWindow;
+    if (oldParent == newParent) return;
+    if (oldParent) [oldParent removeChildWindow:bank];
+    if (newParent) [newParent addChildWindow:bank ordered:NSWindowAbove];
 }
 
 /* Info — DOpus "Read Info". Single selection: show all properties.
@@ -4028,14 +4216,83 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     return out;
 }
 
+/* Present the sync form inside a proper NSPanel run as a modal, returns
+ * 0=cancel, 1=run, 2=save; writes fields into *outProfile on run/save. */
+- (int)runSyncDialogWithTitle:(NSString *)title
+                          info:(NSString *)info
+                      allowRun:(BOOL)allowRun
+                          seed:(NSDictionary *)seed
+                    outProfile:(NSDictionary **)outProfile {
+    NSRect frame = NSMakeRect(0, 0, 640, 540);
+    NSPanel *panel = [[NSPanel alloc] initWithContentRect:frame
+        styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable)
+        backing:NSBackingStoreBuffered defer:NO];
+    panel.title = title;
+
+    NSView *content = panel.contentView;
+
+    NSTextField *hdr = [NSTextField labelWithString:title];
+    hdr.font = [NSFont boldSystemFontOfSize:14];
+    hdr.frame = NSMakeRect(20, 506, 600, 22);
+    [content addSubview:hdr];
+
+    NSTextField *sub = [NSTextField wrappingLabelWithString:info];
+    sub.textColor = [NSColor secondaryLabelColor];
+    sub.font = [NSFont systemFontOfSize:11];
+    sub.frame = NSMakeRect(20, 472, 600, 32);
+    [content addSubview:sub];
+
+    NSView *acc = nil;
+    NSDictionary *fields = [self buildSyncForm:&acc profile:seed];
+    acc.frame = NSMakeRect(20, 60, 600, 400);
+    [content addSubview:acc];
+
+    IDOpusDialogHandler *handler = [[IDOpusDialogHandler alloc] init];
+    objc_setAssociatedObject(panel, "dlgHandler", handler, OBJC_ASSOCIATION_RETAIN);
+
+    NSButton *cancel = [NSButton buttonWithTitle:L(@"Cancel") target:handler action:@selector(stopCancel:)];
+    cancel.keyEquivalent = @"\033";
+    cancel.bezelStyle = NSBezelStyleRounded;
+    cancel.frame = NSMakeRect(520, 14, 100, 32);
+    [content addSubview:cancel];
+
+    if (allowRun) {
+        NSButton *save = [NSButton buttonWithTitle:L(@"Save Profile") target:handler action:@selector(stopSave:)];
+        save.bezelStyle = NSBezelStyleRounded;
+        save.frame = NSMakeRect(380, 14, 130, 32);
+        [content addSubview:save];
+
+        NSButton *run = [NSButton buttonWithTitle:L(@"Run") target:handler action:@selector(stopRun:)];
+        run.bezelStyle = NSBezelStyleRounded;
+        run.keyEquivalent = @"\r";
+        run.frame = NSMakeRect(270, 14, 100, 32);
+        [content addSubview:run];
+    } else {
+        NSButton *save = [NSButton buttonWithTitle:L(@"Save") target:handler action:@selector(stopSave:)];
+        save.bezelStyle = NSBezelStyleRounded;
+        save.keyEquivalent = @"\r";
+        save.frame = NSMakeRect(410, 14, 100, 32);
+        [content addSubview:save];
+    }
+
+    panel.initialFirstResponder = fields[@"name"];
+    [panel center];
+    NSInteger action = [NSApp runModalForWindow:panel];
+    [panel orderOut:nil];
+
+    if (action == 0) return 0;
+    NSDictionary *profile = [self readSyncForm:fields];
+    if (outProfile) *outProfile = profile;
+    return (int)action;
+}
+
 - (void)syncSourceToDestAction:(id)sender {
     ListerWindowController *src = _activeSource;
     ListerWindowController *dst = _activeDest;
     NSArray<NSString *> *selection = [src selectedPaths];
-    NSString *srcDisplay = src.currentPath ?: @"";
     NSMutableDictionary *seed = [@{
         @"name":     @"",
-        @"source":   srcDisplay,
+        @"source":   src.currentPath ?: @"",
         @"dest":     dst.currentPath ?: @"",
         @"archive":  @YES,
         @"compress": @NO,
@@ -4045,43 +4302,30 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     } mutableCopy];
     if (selection.count > 0) {
         seed[@"sources"] = selection;
-        seed[@"source"] = [NSString stringWithFormat:@"%lu selected item%@ in %@",
+        seed[@"source"] = [NSString stringWithFormat:L(@"%lu selected item(s) in %@"),
                            (unsigned long)selection.count,
-                           selection.count == 1 ? @"" : @"s",
                            src.currentPath ?: @""];
     }
 
-    NSAlert *alert = [[NSAlert alloc] init];
-    alert.messageText = @"Sync with rsync";
-    alert.informativeText = @"Source / Dest can be local or remote (user@host:/path). Uses /usr/bin/rsync — existing SSH keys in ~/.ssh/ apply to remote targets.";
-    NSView *acc = nil;
-    NSDictionary *fields = [self buildSyncForm:&acc profile:seed];
-    alert.accessoryView = acc;
-    [alert addButtonWithTitle:@"Run"];
-    [alert addButtonWithTitle:@"Save Profile"];
-    [alert addButtonWithTitle:@"Cancel"];
-    [alert.window setInitialFirstResponder:fields[@"source"]];
+    NSDictionary *profile = nil;
+    int action = [self runSyncDialogWithTitle:L(@"Sync with rsync")
+        info:L(@"Source / Dest can be local or remote (user@host:/path). Uses /usr/bin/rsync — existing SSH keys in ~/.ssh/ apply to remote targets.")
+        allowRun:YES seed:seed outProfile:&profile];
+    if (action == 0) return;
 
-    NSModalResponse r = [alert runModal];
-    if (r == NSAlertThirdButtonReturn) return;  /* Cancel */
-
-    NSDictionary *profile = [self readSyncForm:fields];
     if (!((NSString *)profile[@"source"]).length || !((NSString *)profile[@"dest"]).length) {
-        [self showAlert:@"Sync" info:@"Source and destination are required." style:NSAlertStyleWarning];
+        [self showAlert:L(@"Sync") info:L(@"Source and destination are required.") style:NSAlertStyleWarning];
         return;
     }
 
-    if (r == NSAlertSecondButtonReturn) {
-        /* Save profile — require a name */
+    if (action == 2) {
         if (!((NSString *)profile[@"name"]).length) {
-            [self showAlert:@"Save Profile"
-                       info:@"Profile needs a name."
-                      style:NSAlertStyleInformational];
+            [self showAlert:L(@"Save Profile") info:L(@"Profile needs a name.") style:NSAlertStyleInformational];
             return;
         }
         if ([profile[@"sources"] isKindOfClass:[NSArray class]]) {
-            [self showAlert:@"Save Profile"
-                       info:@"Profiles can't be saved from a selection. Run the sync now, or clear the selection and reopen the dialog to save a folder-level profile."
+            [self showAlert:L(@"Save Profile")
+                       info:L(@"Profiles can't be saved from a selection. Run the sync now, or clear the selection and reopen the dialog to save a folder-level profile.")
                       style:NSAlertStyleWarning];
             return;
         }
@@ -4091,7 +4335,6 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
         return;
     }
 
-    /* Run */
     NSWindow *parent = src.window ?: dst.window ?: [NSApp keyWindow];
     [self runRsyncWithProfile:profile sourceWindow:parent];
 }
@@ -4104,7 +4347,6 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
 }
 
 - (void)addSyncProfileAction:(id)sender {
-    /* Same dialog as syncSourceToDestAction but always saves (no Run button) */
     ListerWindowController *src = _activeSource;
     ListerWindowController *dst = _activeDest;
     NSDictionary *seed = @{
@@ -4117,21 +4359,16 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
         @"dryRun":   @NO,
         @"extraArgs": @"",
     };
-
-    NSAlert *alert = [[NSAlert alloc] init];
-    alert.messageText = @"Add Sync Profile";
-    NSView *acc = nil;
-    NSDictionary *fields = [self buildSyncForm:&acc profile:seed];
-    alert.accessoryView = acc;
-    [alert addButtonWithTitle:@"Save"];
-    [alert addButtonWithTitle:@"Cancel"];
-    if ([alert runModal] != NSAlertFirstButtonReturn) return;
-    NSDictionary *profile = [self readSyncForm:fields];
+    NSDictionary *profile = nil;
+    int action = [self runSyncDialogWithTitle:L(@"Add Sync Profile")
+        info:L(@"Save a reusable sync definition. Run it later from Functions → Sync.")
+        allowRun:NO seed:seed outProfile:&profile];
+    if (action != 2) return;
     if (!((NSString *)profile[@"name"]).length ||
         !((NSString *)profile[@"source"]).length ||
         !((NSString *)profile[@"dest"]).length) {
-        [self showAlert:@"Save Profile"
-                   info:@"Name, source and destination are all required."
+        [self showAlert:L(@"Save Profile")
+                   info:L(@"Name, source and destination are all required.")
                   style:NSAlertStyleWarning];
         return;
     }

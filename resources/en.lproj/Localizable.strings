@@ -170,3 +170,15 @@
 "KB/s"                    = "KB/s";
 "Extra:"                  = "Extra:";
 "extra rsync flags"       = "extra rsync flags";
+"Click any segment to jump there" = "Click any segment to jump there";
+"Sync with rsync"         = "Sync with rsync";
+"Source / Dest can be local or remote (user@host:/path). Uses /usr/bin/rsync — existing SSH keys in ~/.ssh/ apply to remote targets." = "Source / Dest can be local or remote (user@host:/path). Uses /usr/bin/rsync — existing SSH keys in ~/.ssh/ apply to remote targets.";
+"%lu selected item(s) in %@" = "%lu selected item(s) in %@";
+"Source and destination are required." = "Source and destination are required.";
+"Save Profile"            = "Save Profile";
+"Profile needs a name."   = "Profile needs a name.";
+"Profiles can't be saved from a selection. Run the sync now, or clear the selection and reopen the dialog to save a folder-level profile." = "Profiles can't be saved from a selection. Run the sync now, or clear the selection and reopen the dialog to save a folder-level profile.";
+"Add Sync Profile"        = "Add Sync Profile";
+"Save a reusable sync definition. Run it later from Functions → Sync." = "Save a reusable sync definition. Run it later from Functions → Sync.";
+"Name, source and destination are all required." = "Name, source and destination are all required.";
+"Run"                     = "Run";
