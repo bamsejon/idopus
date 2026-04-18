@@ -89,6 +89,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
 @property (nonatomic, strong) ConnectDialogController *connectDialog;
 
 - (void)refreshAllListersShowing:(NSString *)path;
+- (void)raiseAllListerWindowsExcept:(ListerWindowController *)primary;
 - (void)showAlert:(NSString *)title info:(NSString *)info style:(NSAlertStyle)style;
 - (void)performDropOntoLister:(ListerWindowController *)dest
                      fromURLs:(NSArray<NSURL *> *)urls
@@ -1967,6 +1968,7 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
 
 - (void)windowDidBecomeKey:(NSNotification *)notification {
     [_appDelegate promoteToSource:self];
+    [_appDelegate raiseAllListerWindowsExcept:self];
 }
 
 - (void)windowWillClose:(NSNotification *)notification {
@@ -5470,6 +5472,27 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
             }
         }
         [stack addObjectsFromArray:v.subviews];
+    }
+}
+
+/* When any Lister becomes key, surface every sibling Lister too so the whole
+ * iDOpus workspace comes forward as one unit. orderFront: doesn't touch key
+ * state (so the clicked window keeps focus) and skips the window that just
+ * became key to avoid a redundant re-order. */
+- (void)raiseAllListerWindowsExcept:(ListerWindowController *)primary {
+    for (ListerWindowController *lw in _listerControllers) {
+        if (lw == primary) continue;
+        if (lw.window.isMiniaturized) continue;   /* leave dock-miniaturised windows alone */
+        [lw.window orderFront:nil];
+    }
+}
+
+/* App-level activation: whenever iDOpus comes to the foreground from another
+ * app, bring every Lister window up together rather than just the key one. */
+- (void)applicationDidBecomeActive:(NSNotification *)notification {
+    for (ListerWindowController *lw in _listerControllers) {
+        if (lw.window.isMiniaturized) continue;
+        [lw.window orderFront:nil];
     }
 }
 
