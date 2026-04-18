@@ -1134,10 +1134,11 @@ typedef NS_ENUM(NSInteger, ListerState) {
     _currentPath = path;
     _pathField.stringValue = path;
     self.window.title = [NSString stringWithFormat:@"%@ — %@", _remoteLabel ?: @"remote", path];
-    /* NSPathControl expects a file URL; fake it from the remote path so the
-     * breadcrumb at least renders segments. Clicking a segment navigates via
-     * pathControlAction: which re-enters loadPath — correct for remote too. */
-    _pathControl.URL = [NSURL fileURLWithPath:path];
+    /* Build custom breadcrumb items so the path bar shows "SMB host > share"
+     * instead of NSPathControl's default "Macintosh SSD" resolution of a
+     * bogus file URL. Root item gets a server icon; each subdirectory is a
+     * folder icon. */
+    [self applyRemotePathItems];
     [self updateStatusBar];
 
     if (!_history) _history = [NSMutableArray array];
@@ -1897,8 +1898,54 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     }
 }
 
+/* Rebuild the breadcrumb path control for a remote Lister. First item is the
+ * remote server labelled with its protocol (SFTP / SMB); subsequent items
+ * are the path components. Clicks are routed via pathControlAction:. */
+- (void)applyRemotePathItems {
+    if (!self.isRemote) return;
+    NSMutableArray<NSPathControlItem *> *items = [NSMutableArray array];
+
+    NSString *proto = [_remoteSpec containsString:@":smb,"] ? @"SMB" : @"SFTP";
+    NSPathControlItem *root = [[NSPathControlItem alloc] init];
+    root.title = [NSString stringWithFormat:@"%@  %@", proto, _remoteLabel ?: @""];
+    NSImage *serverIcon = [NSImage imageWithSystemSymbolName:@"server.rack"
+                                        accessibilityDescription:nil];
+    if (!serverIcon) serverIcon = [NSImage imageWithSystemSymbolName:@"network"
+                                                accessibilityDescription:nil];
+    root.image = serverIcon;
+    [items addObject:root];
+
+    NSImage *folderIcon = [NSImage imageWithSystemSymbolName:@"folder.fill"
+                                        accessibilityDescription:nil];
+    for (NSString *c in [_currentPath componentsSeparatedByString:@"/"]) {
+        if (!c.length) continue;
+        NSPathControlItem *it = [[NSPathControlItem alloc] init];
+        it.title = c;
+        it.image = folderIcon;
+        [items addObject:it];
+    }
+    _pathControl.pathItems = items;
+}
+
 - (void)pathControlAction:(NSPathControl *)sender {
     NSPathControlItem *clicked = sender.clickedPathItem;
+    if (!clicked) return;
+    if (self.isRemote) {
+        /* For remote Listers we render custom pathItems without file URLs.
+         * Reconstruct the target path from the clicked item's index in the
+         * array (item 0 = remote root = "/", then one segment per dir). */
+        NSInteger idx = [sender.pathItems indexOfObject:clicked];
+        if (idx == NSNotFound) return;
+        if (idx == 0) { [self loadPath:@"/"]; return; }
+        NSArray<NSString *> *comps = [_currentPath componentsSeparatedByString:@"/"];
+        NSMutableArray<NSString *> *nonEmpty = [NSMutableArray array];
+        for (NSString *c in comps) if (c.length) [nonEmpty addObject:c];
+        if (idx > (NSInteger)nonEmpty.count) return;
+        NSString *p = [@"/" stringByAppendingString:
+            [[nonEmpty subarrayWithRange:NSMakeRange(0, idx)] componentsJoinedByString:@"/"]];
+        [self loadPath:p];
+        return;
+    }
     if (clicked.URL) [self loadPath:clicked.URL.path];
 }
 
