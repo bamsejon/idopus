@@ -94,6 +94,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
 - (void)raiseAllListerWindowsExcept:(ListerWindowController *)primary;
 - (void)listerDidMove:(ListerWindowController *)lw;
 - (void)enforceBankBetweenListers;
+- (void)snapshotListerFrames;
 - (void)showAlert:(NSString *)title info:(NSString *)info style:(NSAlertStyle)style;
 - (void)performDropOntoLister:(ListerWindowController *)dest
                      fromURLs:(NSArray<NSURL *> *)urls
@@ -5494,6 +5495,14 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
  * free). Mirrors the original DOpus Magellan "workspace moves as one" feel.
  * No-op for 1 or 3+ visible Listers — the two-pane case is the one users
  * consistently want tiled. */
+- (void)snapshotListerFrames {
+    if (!_lastListerFrames) _lastListerFrames = [NSMutableDictionary dictionary];
+    for (ListerWindowController *l in _listerControllers) {
+        _lastListerFrames[[NSValue valueWithNonretainedObject:l.window]] =
+            [NSValue valueWithRect:l.window.frame];
+    }
+}
+
 - (void)listerDidMove:(ListerWindowController *)lw {
     if (_suppressSnap) return;
     if (!_lastListerFrames) _lastListerFrames = [NSMutableDictionary dictionary];
@@ -5501,8 +5510,14 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     NSValue *key = [NSValue valueWithNonretainedObject:lw.window];
     NSRect newF = lw.window.frame;
     NSValue *oldVal = _lastListerFrames[key];
-    _lastListerFrames[key] = [NSValue valueWithRect:newF];
-    if (!oldVal) return;   /* first observation — just record */
+    if (!oldVal) {
+        /* First observation ever — we need the pre-move frame to compute a
+         * delta, and we don't have it. Snapshot NOW so subsequent events
+         * have a baseline, and bail on this one. Losing the very first
+         * pixel of a drag is acceptable; losing a 200-pixel jump is not. */
+        [self snapshotListerFrames];
+        return;
+    }
 
     /* Collect the currently-visible Listers. We only snap when there are
      * exactly two so we don't accidentally drag unrelated windows around. */
@@ -5510,11 +5525,12 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     for (ListerWindowController *l in _listerControllers) {
         if (l.window.isVisible && !l.window.isMiniaturized) [visible addObject:l];
     }
-    if (visible.count != 2) return;
 
     NSRect oldF = oldVal.rectValue;
     CGFloat dx = newF.origin.x - oldF.origin.x;
     CGFloat dy = newF.origin.y - oldF.origin.y;
+    _lastListerFrames[key] = [NSValue valueWithRect:newF];
+    if (visible.count != 2) return;
     if (fabs(dx) < 0.5 && fabs(dy) < 0.5) return;
 
     _suppressSnap = YES;
@@ -5564,6 +5580,7 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     NSRect bank = NSMakeRect(bankX, lf.origin.y, bankW, lf.size.height);
     [_buttonBankPanel.window setFrame:bank display:YES animate:NO];
     _suppressSnap = NO;
+    [self snapshotListerFrames];
 }
 
 /* When any Lister becomes key, surface every sibling Lister too so the whole
