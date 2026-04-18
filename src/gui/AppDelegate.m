@@ -322,6 +322,9 @@ typedef NS_ENUM(NSInteger, ListerState) {
 @property (nonatomic, strong) NSProgressIndicator *spinner;
 @property (nonatomic, strong) NSButton *cancelButton;
 @property (atomic, assign) BOOL cancelled;
+/* Optional: handler invoked by cancel: so jobs that don't use runOperation:
+ * (rclone-backed downloads, etc.) can terminate their own tasks. */
+@property (nonatomic, copy) void (^cancelHandler)(void);
 - (void)runOperation:(BOOL)isMove
                paths:(NSArray<NSString *> *)paths
                names:(NSArray<NSString *> *)names
@@ -875,6 +878,14 @@ typedef NS_ENUM(NSInteger, ListerState) {
     _pathControl.action = @selector(pathControlAction:);
     _pathControl.doubleAction = @selector(pathControlDoubleClick:);
     _pathControl.translatesAutoresizingMaskIntoConstraints = NO;
+    /* Don't let a long path push the window wider. NSPathControl otherwise
+     * reports an intrinsic content size matching the full path, and autolayout
+     * happily grows the window to fit. Low hugging + compression resistance
+     * = it yields to the fixed window width and truncates its segments. */
+    [_pathControl setContentHuggingPriority:NSLayoutPriorityDefaultLow
+                            forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [_pathControl setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow - 1
+                                            forOrientation:NSLayoutConstraintOrientationHorizontal];
     [content addSubview:_pathControl];
 
     /* Back / Forward (history) */
@@ -2308,6 +2319,7 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     self.cancelled = YES;
     _cancelButton.enabled = NO;
     _titleLabel.stringValue = L(@"Cancelling…");
+    if (self.cancelHandler) self.cancelHandler();
 }
 
 /* Returns: 1=Replace, 2=Skip, 3=Keep Both, 4=Cancel-all, 5=Merge.
@@ -5523,13 +5535,19 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     __block BOOL anyFailed = NO;
     NSUInteger total = names.count;
     NSUInteger i = 0;
+    NSMutableArray<NSTask *> *runningTasks = [NSMutableArray array];
+    job.cancelHandler = ^{
+        for (NSTask *t in [runningTasks copy]) {
+            if (t.isRunning) [t terminate];
+        }
+    };
     for (NSString *name in names) {
         i++;
         NSString *remotePath = [src.currentPath stringByAppendingPathComponent:name];
         NSString *rowLabel = [NSString stringWithFormat:@"(%lu/%lu) %@",
                                (unsigned long)i, (unsigned long)total, name];
         job.fileLabel.stringValue = rowLabel;
-        [IDOpusRclone copyFromRemote:src.remoteSpec
+        NSTask *task = [IDOpusRclone copyFromRemote:src.remoteSpec
                           remotePath:remotePath
                              toLocal:destDir
                             progress:^(NSString *line) {
@@ -5564,13 +5582,14 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
                 [job.spinner stopAnimation:nil];
                 [[JobsPanelController shared] removeJobRow:job.rowView];
                 [self refreshAllListersShowing:destDir];
-                if (anyFailed) {
+                if (anyFailed && !job.cancelled) {
                     [self showAlert:L(@"Download")
                                info:L(@"Some items could not be downloaded.")
                               style:NSAlertStyleWarning];
                 }
             }
         }];
+        if (task) [runningTasks addObject:task];
     }
 }
 
