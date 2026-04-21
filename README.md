@@ -4,6 +4,8 @@
 
 iDOpus brings the classic dual-pane file manager experience from the Commodore Amiga to modern macOS on Apple Silicon. The original Directory Opus 5 Magellan was released as open source under the AROS Public License in 2012, and this project builds on that codebase.
 
+A Qt 6 build (`idopus-qt`) additionally targets Linux desktops (tested on KDE Plasma). See *Building on Linux* below for its current feature set — it's a minimal MVP, not full macOS parity.
+
 ![iDOpus screenshot — two Listers with Button Bank between them, thumbnails and breadcrumb paths](docs/screenshot.png)
 
 ## Status: 1.0
@@ -117,6 +119,8 @@ Requires macOS 13 (Ventura) or later on Apple Silicon (M1/M2/M3/M4).
 
 Drag between Listers = Copy; hold `⌥` (Option) while dragging = Move.
 
+On Linux, `Ctrl` replaces `⌘` and `Alt` replaces `⌥` (so drag+`Ctrl` = Move, Select By Pattern is `Ctrl+Shift+A`).
+
 ## Background
 
 Directory Opus was *the* file manager on Amiga. First released in 1990 by Jonathan Potter / GP Software, it became the gold standard for file management — a dual-pane, fully customizable powerhouse that made the Amiga's Workbench feel primitive in comparison.
@@ -141,7 +145,7 @@ Clean-room port guided by the original source in `original-amiga-source/`. Amiga
 |---|---|---|
 | `exec.library` (memory, IPC, signals) | `malloc`/GCD/`pthread_mutex` via PAL | ✅ |
 | `dos.library` (file I/O, paths, patterns) | POSIX + Foundation via PAL | ✅ |
-| Intuition / BOOPSI GUI | AppKit (`NSWindow`, `NSTableView`, `NSPanel`) | ✅ |
+| Intuition / BOOPSI GUI | AppKit (`NSWindow`, `NSTableView`, `NSPanel`) on macOS; Qt 6 Widgets (`QMainWindow`, `QTreeView`) on Linux | ✅ |
 | DOpus Lister + source/dest model | `ListerWindowController` state | ✅ |
 | DOpus Button Bank | floating non-activating `NSPanel` | ✅ (+ user-custom buttons) |
 | DOpus file types + actions | per-extension shell commands stored in defaults | ✅ |
@@ -179,6 +183,25 @@ Produce an ad-hoc-signed `.dmg` in `dist/`:
 ```
 ./scripts/package.sh
 ```
+
+## Building on Linux (Qt 6)
+
+Requires CMake (3.20+), a C11 compiler, and Qt 6.5+ (Widgets). On Debian/Ubuntu:
+
+```
+sudo apt install build-essential cmake qt6-base-dev
+cmake -S . -B build
+cmake --build build -j
+./build/idopus-qt
+```
+
+Run the PAL and core test suites:
+
+```
+./build/pal_test && ./build/core_test
+```
+
+The macOS AppKit target is skipped automatically on non-Apple platforms. The Qt/Linux build covers dual-pane navigation with sortable headers, filter + dotfile toggle, drag-and-drop (between Listers and with Nautilus/Dolphin), a right-click context menu, and Select By Pattern (`Ctrl+Shift+A`). Quick Look, background progress, file type actions, bookmarks, and tabs remain macOS-only for now.
 
 ## License
 
