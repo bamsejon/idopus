@@ -27,6 +27,7 @@ public slots:
     void refresh();
     void selectAll();
     void selectNone();
+    void selectByPattern(const QString &pattern);
     void setActive(bool active);
     void setShowPattern(const QString &pattern);
     void setHideDotfiles(bool hide);

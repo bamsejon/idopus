@@ -214,6 +214,33 @@ void ListerWidget::refresh() {
 void ListerWidget::selectAll()  { m_view->selectAll(); }
 void ListerWidget::selectNone() { m_view->clearSelection(); }
 
+void ListerWidget::selectByPattern(const QString &pattern) {
+    if (!m_model || !m_view || !m_view->selectionModel()) return;
+    if (pattern.isEmpty()) return;
+    QByteArray pat = pattern.toUtf8();
+
+    QItemSelection sel;
+    QModelIndex firstHit;
+    const int rows = m_model->rowCount();
+    const int cols = m_model->columnCount();
+    for (int row = 0; row < rows; ++row) {
+        const dir_entry_t *e = m_model->entryAt(row);
+        if (!e) continue;
+        if (!pal_path_match(pat.constData(), e->name)) continue;
+        QModelIndex left  = m_model->index(row, 0);
+        QModelIndex right = m_model->index(row, cols - 1);
+        sel.select(left, right);
+        if (!firstHit.isValid()) firstHit = left;
+    }
+    m_view->selectionModel()->select(sel,
+        QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
+    if (firstHit.isValid()) {
+        m_view->setCurrentIndex(firstHit);
+        m_view->scrollTo(firstHit, QAbstractItemView::PositionAtCenter);
+    }
+    updateStatus();
+}
+
 QStringList ListerWidget::selectedPaths() const {
     QStringList out;
     if (!m_view || !m_view->selectionModel() || !m_model) return out;

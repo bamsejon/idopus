@@ -100,6 +100,13 @@ MainWindow::MainWindow(const QString &leftPath, const QString &rightPath,
           [this]{ if (m_active) m_active->toggleHideDotfiles(); });
     addSC(QKeySequence(QStringLiteral("Ctrl+H")),
           [this]{ if (m_active) m_active->toggleHideDotfiles(); });
+    addSC(QKeySequence(QStringLiteral("Ctrl+Shift+A")), [this]{
+        if (!m_active) return;
+        bool ok;
+        QString p = QInputDialog::getText(this, tr("Select By Pattern"),
+            tr("Pattern (glob, e.g. *.txt):"), QLineEdit::Normal, QString(), &ok);
+        if (ok && !p.isEmpty()) m_active->selectByPattern(p);
+    });
 
     setActive(m_left);
 }
