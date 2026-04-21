@@ -12,6 +12,14 @@
 #include <QStandardPaths>
 #include <QStorageInfo>
 #include <QItemSelectionModel>
+#include <QMenu>
+#include <QDesktopServices>
+#include <QUrl>
+#include <QFileInfo>
+#include <QGuiApplication>
+#include <QClipboard>
+#include <QProcess>
+#include <QInputDialog>
 
 extern "C" {
 #include "core/dir_entry.h"
@@ -140,6 +148,10 @@ ListerWidget::ListerWidget(const QString &initialPath, QWidget *parent)
 
     connect(m_view, &QAbstractItemView::doubleClicked,
             this,   &ListerWidget::onDoubleClicked);
+
+    m_view->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(m_view, &QWidget::customContextMenuRequested,
+            this,   &ListerWidget::onContextMenu);
 
     /* Keyboard: Alt+Up still triggers goParent on the focused pane */
     auto *sc = new QShortcut(QKeySequence(Qt::ALT | Qt::Key_Up), this);
@@ -299,6 +311,68 @@ void ListerWidget::onHeaderClicked(int section) {
     m_view->header()->setSortIndicator(
         section, reverse ? Qt::DescendingOrder : Qt::AscendingOrder);
     updateStatus();
+}
+
+void ListerWidget::onContextMenu(const QPoint &pos) {
+    if (!m_view || !m_model) return;
+    QModelIndex idx = m_view->indexAt(pos);
+    if (!idx.isValid()) return;
+
+    if (!m_view->selectionModel()->isRowSelected(idx.row(), QModelIndex())) {
+        m_view->selectionModel()->select(idx,
+            QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
+        m_view->setCurrentIndex(idx);
+    }
+
+    const QStringList paths = selectedPaths();
+    if (paths.isEmpty()) return;
+    const bool single = (paths.size() == 1);
+    const QString first = paths.first();
+
+    QMenu menu(this);
+    QAction *aOpen    = menu.addAction(tr("Open"));
+    QAction *aOpenWith = menu.addAction(tr("Open With…"));
+    QAction *aReveal  = menu.addAction(tr("Reveal in Files"));
+    QAction *aCopy    = menu.addAction(tr("Copy Path"));
+    menu.addSeparator();
+    QAction *aInfo    = menu.addAction(tr("Info"));
+    QAction *aRename  = menu.addAction(tr("Rename"));
+    menu.addSeparator();
+    QAction *aTrash   = menu.addAction(tr("Move to Trash"));
+
+    aRename->setEnabled(single);
+    aOpenWith->setEnabled(single);
+
+    QAction *chosen = menu.exec(m_view->viewport()->mapToGlobal(pos));
+    if (!chosen) return;
+
+    if (chosen == aOpen) {
+        if (single) {
+            QFileInfo fi(first);
+            if (fi.isDir()) setPath(first);
+            else QDesktopServices::openUrl(QUrl::fromLocalFile(first));
+        } else {
+            for (const QString &p : paths)
+                QDesktopServices::openUrl(QUrl::fromLocalFile(p));
+        }
+    } else if (chosen == aOpenWith) {
+        // TODO: proper Open With picker (.desktop entries)
+        bool ok;
+        QString cmd = QInputDialog::getText(this, tr("Open With"),
+            tr("Command:"), QLineEdit::Normal, QString(), &ok);
+        if (ok && !cmd.isEmpty())
+            QProcess::startDetached(cmd, QStringList{first});
+    } else if (chosen == aReveal) {
+        QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(first).absolutePath()));
+    } else if (chosen == aCopy) {
+        QGuiApplication::clipboard()->setText(single ? first : paths.join(QLatin1Char('\n')));
+    } else if (chosen == aInfo) {
+        emit infoRequested(this);
+    } else if (chosen == aRename) {
+        emit renameRequested(this);
+    } else if (chosen == aTrash) {
+        emit deleteRequested(this);
+    }
 }
 
 void ListerWidget::onPathEdited() {
