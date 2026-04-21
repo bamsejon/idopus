@@ -3,12 +3,16 @@
 #include <QWidget>
 #include <QString>
 #include <QStringList>
+#include <QList>
+#include <QUrl>
 
 class QTreeView;
 class QLineEdit;
 class QPushButton;
 class QLabel;
 class QModelIndex;
+class QEvent;
+class QObject;
 class DirBufferModel;
 
 class ListerWidget : public QWidget {
@@ -42,6 +46,11 @@ signals:
     void makeDirRequested(ListerWidget *source);
     void infoRequested(ListerWidget *source);
     void filterRequested(ListerWidget *source);
+    void dropReceived(ListerWidget *dest, const QList<QUrl> &urls,
+                      Qt::DropAction action);
+
+protected:
+    bool eventFilter(QObject *obj, QEvent *event) override;
 
 private slots:
     void onDoubleClicked(const QModelIndex &index);

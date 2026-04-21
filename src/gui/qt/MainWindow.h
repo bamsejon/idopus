@@ -1,6 +1,8 @@
 #pragma once
 
 #include <QMainWindow>
+#include <QList>
+#include <QUrl>
 
 class ListerWidget;
 class ButtonBank;
@@ -20,6 +22,7 @@ private slots:
     void doMakeDir(ListerWidget *src);
     void doInfo(ListerWidget *src);
     void doFilter(ListerWidget *src);
+    void onDrop(ListerWidget *dest, const QList<QUrl> &urls, Qt::DropAction action);
 
 private:
     void setActive(ListerWidget *lister);

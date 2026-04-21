@@ -119,6 +119,7 @@ void MainWindow::wireLister(ListerWidget *l) {
     connect(l, &ListerWidget::makeDirRequested, this, &MainWindow::doMakeDir);
     connect(l, &ListerWidget::infoRequested,    this, &MainWindow::doInfo);
     connect(l, &ListerWidget::filterRequested,  this, &MainWindow::doFilter);
+    connect(l, &ListerWidget::dropReceived,     this, &MainWindow::onDrop);
 }
 
 ListerWidget *MainWindow::peerOf(ListerWidget *lister) const {
@@ -314,4 +315,39 @@ void MainWindow::doFilter(ListerWidget *src) {
         QLineEdit::Normal, QString(), &ok);
     if (!ok) return;
     src->setShowPattern(pattern);
+}
+
+void MainWindow::onDrop(ListerWidget *dest, const QList<QUrl> &urls,
+                        Qt::DropAction action) {
+    if (!dest || urls.isEmpty()) return;
+    const QString destDir = dest->currentPath();
+    const QDir destQDir(destDir);
+
+    int ok = 0, fail = 0, skipped = 0;
+    for (const QUrl &u : urls) {
+        if (!u.isLocalFile()) { ++skipped; continue; }
+        const QString src = u.toLocalFile();
+        QFileInfo si(src);
+        if (!si.exists()) { ++skipped; continue; }
+        if (QFileInfo(si.absolutePath()) == QFileInfo(destDir)) {
+            /* same-dir drop: nothing to do */
+            ++skipped;
+            continue;
+        }
+        const QString target = destQDir.filePath(si.fileName());
+        if (QFileInfo::exists(target)) { ++skipped; continue; }
+        const bool success = (action == Qt::MoveAction)
+                                ? moveItem(src, target)
+                                : copyRecursive(src, target);
+        if (success) ++ok; else ++fail;
+    }
+    if (m_left)  m_left->refresh();
+    if (m_right) m_right->refresh();
+    if (fail || skipped) {
+        QMessageBox::warning(this, tr("Drop"),
+            tr("%1 %2, %3 skipped, %4 failed")
+              .arg(ok)
+              .arg(action == Qt::MoveAction ? tr("moved") : tr("copied"))
+              .arg(skipped).arg(fail));
+    }
 }

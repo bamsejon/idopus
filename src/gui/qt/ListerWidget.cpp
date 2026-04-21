@@ -20,6 +20,11 @@
 #include <QClipboard>
 #include <QProcess>
 #include <QInputDialog>
+#include <QDragEnterEvent>
+#include <QDragMoveEvent>
+#include <QDropEvent>
+#include <QMimeData>
+#include <QGuiApplication>
 
 extern "C" {
 #include "core/dir_entry.h"
@@ -152,6 +157,13 @@ ListerWidget::ListerWidget(const QString &initialPath, QWidget *parent)
     m_view->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(m_view, &QWidget::customContextMenuRequested,
             this,   &ListerWidget::onContextMenu);
+
+    m_view->setDragEnabled(true);
+    m_view->setAcceptDrops(true);
+    m_view->setDropIndicatorShown(true);
+    m_view->setDragDropMode(QAbstractItemView::DragDrop);
+    m_view->setDefaultDropAction(Qt::CopyAction);
+    m_view->viewport()->installEventFilter(this);
 
     /* Keyboard: Alt+Up still triggers goParent on the focused pane */
     auto *sc = new QShortcut(QKeySequence(Qt::ALT | Qt::Key_Up), this);
@@ -431,4 +443,52 @@ void ListerWidget::updateStatus() {
                 .arg(QString::fromUtf8(free_buf));
     }
     m_statusLabel->setText(text);
+}
+
+static bool mimeHasLocalFiles(const QMimeData *md) {
+    if (!md || !md->hasUrls()) return false;
+    const auto urls = md->urls();
+    for (const QUrl &u : urls) {
+        if (!u.isLocalFile()) return false;
+    }
+    return !urls.isEmpty();
+}
+
+static Qt::DropAction chooseAction(Qt::KeyboardModifiers mods) {
+    return (mods & Qt::ControlModifier) ? Qt::MoveAction : Qt::CopyAction;
+}
+
+bool ListerWidget::eventFilter(QObject *obj, QEvent *event) {
+    if (!m_view || obj != m_view->viewport())
+        return QWidget::eventFilter(obj, event);
+
+    switch (event->type()) {
+    case QEvent::DragEnter: {
+        auto *e = static_cast<QDragEnterEvent *>(event);
+        if (!mimeHasLocalFiles(e->mimeData())) return false;
+        e->setDropAction(chooseAction(e->modifiers()));
+        e->accept();
+        return true;
+    }
+    case QEvent::DragMove: {
+        auto *e = static_cast<QDragMoveEvent *>(event);
+        if (!mimeHasLocalFiles(e->mimeData())) return false;
+        e->setDropAction(chooseAction(e->modifiers()));
+        e->accept();
+        return true;
+    }
+    case QEvent::Drop: {
+        auto *e = static_cast<QDropEvent *>(event);
+        if (!mimeHasLocalFiles(e->mimeData())) return false;
+        Qt::DropAction act = chooseAction(e->modifiers());
+        QList<QUrl> urls = e->mimeData()->urls();
+        e->setDropAction(act);
+        e->accept();
+        emit dropReceived(this, urls, act);
+        return true;
+    }
+    default:
+        break;
+    }
+    return QWidget::eventFilter(obj, event);
 }

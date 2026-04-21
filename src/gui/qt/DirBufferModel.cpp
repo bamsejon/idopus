@@ -1,6 +1,9 @@
 #include "DirBufferModel.h"
 
 #include <QFileInfo>
+#include <QMimeData>
+#include <QSet>
+#include <QUrl>
 #include <cstring>
 
 extern "C" {
@@ -135,6 +138,36 @@ void DirBufferModel::setFilter(const QString &showPattern,
         rejectHidden);
     dir_buffer_apply_filter(m_buf);
     endResetModel();
+}
+
+Qt::ItemFlags DirBufferModel::flags(const QModelIndex &index) const {
+    Qt::ItemFlags base = QAbstractTableModel::flags(index);
+    if (index.isValid()) base |= Qt::ItemIsDragEnabled;
+    return base;
+}
+
+QStringList DirBufferModel::mimeTypes() const {
+    return {QStringLiteral("text/uri-list")};
+}
+
+QMimeData *DirBufferModel::mimeData(const QModelIndexList &indexes) const {
+    if (!m_buf) return nullptr;
+    QList<QUrl> urls;
+    QSet<int> seenRows;
+    for (const QModelIndex &idx : indexes) {
+        if (!idx.isValid()) continue;
+        if (seenRows.contains(idx.row())) continue;
+        seenRows.insert(idx.row());
+        const dir_entry_t *e = dir_buffer_get_entry(m_buf, idx.row());
+        if (!e) continue;
+        char full[4096];
+        pal_path_join(m_buf->path, e->name, full, sizeof full);
+        urls << QUrl::fromLocalFile(QString::fromUtf8(full));
+    }
+    if (urls.isEmpty()) return nullptr;
+    auto *md = new QMimeData;
+    md->setUrls(urls);
+    return md;
 }
 
 DirBufferModel::Stats DirBufferModel::stats() const {
