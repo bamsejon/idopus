@@ -100,9 +100,20 @@ void DirBufferModel::setPath(const QString &path) {
     if (m_buf) {
         QByteArray utf = path.toUtf8();
         dir_buffer_read(m_buf, utf.constData());
-        dir_buffer_set_sort(m_buf, SORT_NAME, false, SEPARATE_DIRS_FIRST);
+        dir_buffer_set_sort(m_buf, m_sortField, m_sortReverse, m_sortSep);
         dir_buffer_sort(m_buf);
     }
+    endResetModel();
+}
+
+void DirBufferModel::setSort(sort_field_t field, bool reverse, separation_t sep) {
+    m_sortField   = field;
+    m_sortReverse = reverse;
+    m_sortSep     = sep;
+    if (!m_buf) return;
+    beginResetModel();
+    dir_buffer_set_sort(m_buf, field, reverse, sep);
+    dir_buffer_sort(m_buf);
     endResetModel();
 }
 

@@ -45,6 +45,7 @@ signals:
 private slots:
     void onDoubleClicked(const QModelIndex &index);
     void onPathEdited();
+    void onHeaderClicked(int section);
     void updateStatus();
 
 private:

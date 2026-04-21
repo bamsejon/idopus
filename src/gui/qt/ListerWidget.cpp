@@ -28,8 +28,13 @@ ListerWidget::ListerWidget(const QString &initialPath, QWidget *parent)
     m_view->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_view->setSelectionMode(QAbstractItemView::ExtendedSelection);
     m_view->setUniformRowHeights(true);
-    m_view->setSortingEnabled(false);
+    m_view->setSortingEnabled(false);   /* ordering driven by dir_buffer */
     m_view->header()->setStretchLastSection(true);
+    m_view->header()->setSectionsClickable(true);
+    m_view->header()->setSortIndicatorShown(true);
+    m_view->header()->setSortIndicator(DirBufferModel::ColName, Qt::AscendingOrder);
+    connect(m_view->header(), &QHeaderView::sectionClicked,
+            this, &ListerWidget::onHeaderClicked);
 
     m_model = new DirBufferModel(this);
     m_view->setModel(m_model);
@@ -251,6 +256,22 @@ void ListerWidget::onDoubleClicked(const QModelIndex &index) {
     char child[4096];
     pal_path_join(m_path.toUtf8().constData(), e->name, child, sizeof child);
     setPath(QString::fromUtf8(child));
+}
+
+void ListerWidget::onHeaderClicked(int section) {
+    if (!m_model) return;
+    sort_field_t field;
+    switch (section) {
+    case DirBufferModel::ColName: field = SORT_NAME; break;
+    case DirBufferModel::ColSize: field = SORT_SIZE; break;
+    case DirBufferModel::ColDate: field = SORT_DATE; break;
+    default: return;
+    }
+    bool reverse = (field == m_model->sortField()) ? !m_model->sortReverse() : false;
+    m_model->setSort(field, reverse);
+    m_view->header()->setSortIndicator(
+        section, reverse ? Qt::DescendingOrder : Qt::AscendingOrder);
+    updateStatus();
 }
 
 void ListerWidget::onPathEdited() {

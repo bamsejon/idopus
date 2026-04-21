@@ -6,6 +6,10 @@
 #include <QIcon>
 #include <QString>
 
+extern "C" {
+#include "core/dir_entry.h"
+}
+
 struct dir_buffer;
 struct dir_entry;
 
@@ -29,6 +33,11 @@ public:
                    bool rejectHidden);
     const struct dir_entry *entryAt(int row) const;
 
+    void setSort(sort_field_t field, bool reverse,
+                 separation_t sep = SEPARATE_DIRS_FIRST);
+    sort_field_t sortField()   const { return m_sortField; }
+    bool         sortReverse() const { return m_sortReverse; }
+
     struct Stats {
         int     total_files = 0;
         int     total_dirs  = 0;
@@ -42,4 +51,8 @@ private:
     mutable QHash<QString, QIcon> m_iconCache;
     mutable QIcon m_folderIcon;
     mutable QIcon m_fileIcon;
+
+    sort_field_t m_sortField   = SORT_NAME;
+    bool         m_sortReverse = false;
+    separation_t m_sortSep     = SEPARATE_DIRS_FIRST;
 };
