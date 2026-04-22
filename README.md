@@ -12,11 +12,44 @@ See the *Feature matrix* below for the exact status per platform — the Qt buil
 
 ![iDOpus screenshot — two Listers with Button Bank between them, thumbnails and breadcrumb paths](docs/screenshot.png)
 
-## Status: 1.0
+## Status
 
-All the core DOpus workflows are in place. iDOpus is a daily-driver dual-pane file manager with a Button Bank, source/destination Listers, full file operations with progress, conflict resolution including folder merge, drag-drop, Quick Look, file type actions, and more. See the complete feature list below.
+**macOS (1.0):** a daily-driver dual-pane file manager with Button Bank, source/destination Listers, full file operations with progress, conflict resolution including folder merge, drag-drop, Quick Look, file type actions, bookmarks, tabs, remote transfers (rclone) — see the complete feature list below.
 
-Still planned for future versions: FTP/SMB, content (grep-style) search, Apple Developer ID signing + notarization, scripting bridge.
+**Linux + Windows (in progress):** the Qt 6 build targets **parity with the macOS version** — not a lesser-featured sibling. Every iteration ports another chunk of macOS functionality into the Qt codebase, so Linux and Windows land the same feature in the same release. The section *[Feature matrix](#feature-matrix)* tracks the gap concretely.
+
+Still planned for all three platforms: FTP/SMB, content (grep-style) search, ARexx / scripting bridge. macOS-specific TODO: Apple Developer ID signing + notarization.
+
+## Feature matrix
+
+Legend: ✅ shipped · 🚧 in the current iteration · ⏳ planned · — N/A for this platform.
+
+| Area | macOS | Linux | Windows |
+|---|:---:|:---:|:---:|
+| Dual-pane Listers with SOURCE / DEST focus | ✅ | ✅ | ✅ |
+| Sortable columns (Name / Size / Date / Type) | ✅ | ✅ | ✅ |
+| Path bar with inline editing | ✅ | ✅ | ✅ |
+| **Back / Forward navigation history** | ✅ | ✅ (iter 2) | ✅ (iter 2) |
+| Breadcrumb path control (click ancestors) | ✅ | ⏳ | ⏳ |
+| Type-to-find (prefix search) | ✅ | ⏳ | ⏳ |
+| **Live refresh** (filesystem watcher) | ✅ (FSEvents) | ✅ (iter 2) | ✅ (iter 2) |
+| **Bookmarks menu** + persisted | ✅ | ✅ (iter 2) | ✅ (iter 2) |
+| Copy / Move / Delete / Rename / MakeDir / Info | ✅ | ✅ | ✅ |
+| Conflict dialog (Replace / Skip / Keep Both / Merge) | ✅ | ⏳ | ⏳ |
+| Background **Jobs panel** with progress + cancel | ✅ | ⏳ (iter 4) | ⏳ (iter 4) |
+| **Drag-and-drop** between Listers + external (Ctrl=Move) | ✅ | ✅ | ✅ |
+| **Filter** dialog (show / hide pattern + dotfiles) | ✅ | 🚧 (iter 3) | 🚧 (iter 3) |
+| **Select By Pattern** | ✅ | ✅ | ✅ |
+| **Custom Button Bank** (user buttons + shell commands) | ✅ | 🚧 (iter 3) | 🚧 (iter 3) |
+| **File type actions** (ext → command, Open With menu) | ✅ | 🚧 (iter 3) | 🚧 (iter 3) |
+| **Preferences** dialog | ✅ | ⏳ (iter 4) | ⏳ (iter 4) |
+| **Preview / Quick Look** (image / PDF / text) | ✅ | ⏳ (iter 5) | ⏳ (iter 5) |
+| Compress / Extract (zip, tar.gz) | ✅ | ⏳ (iter 5) | ⏳ (iter 5) |
+| Tabs (native macOS / Qt) | ✅ | ⏳ | ⏳ |
+| Split Display | ✅ | ⏳ | ⏳ |
+| **Remote transfers** (rclone + SMB/SFTP/Bonjour) | ✅ | ⏳ (iter 6) | ⏳ (iter 6) |
+
+Track ongoing work in the `windows/iter-*` branches and open PRs. Goal: reach parity on every row in this table.
 
 ## Download & install (macOS, Apple Silicon)
 

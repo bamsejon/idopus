@@ -1,5 +1,6 @@
 #include "ListerWidget.h"
 #include "DirBufferModel.h"
+#include "FileTypeActions.h"
 
 #include <QTreeView>
 #include <QLineEdit>
@@ -397,11 +398,26 @@ void ListerWidget::reapplyFilter() {
 void ListerWidget::onDoubleClicked(const QModelIndex &index) {
     if (!index.isValid()) return;
     const dir_entry_t *e = m_model->entryAt(index.row());
-    if (!e || !dir_entry_is_dir(e)) return;
+    if (!e) return;
 
     char child[4096];
     pal_path_join(m_path.toUtf8().constData(), e->name, child, sizeof child);
-    setPath(QString::fromUtf8(child));
+    const QString full = QString::fromUtf8(child);
+
+    if (dir_entry_is_dir(e)) {
+        setPath(full);
+        return;
+    }
+
+    /* File: run the default file-type action if one matches, otherwise let the
+     * OS pick (macOS open, Explorer, xdg-open). */
+    if (m_fileTypeActions) {
+        if (const auto *def = m_fileTypeActions->defaultFor(full)) {
+            FileTypeActions::run(def->command, full, this);
+            return;
+        }
+    }
+    QDesktopServices::openUrl(QUrl::fromLocalFile(full));
 }
 
 void ListerWidget::onHeaderClicked(int section) {
@@ -437,8 +453,25 @@ void ListerWidget::onContextMenu(const QPoint &pos) {
     const QString first = paths.first();
 
     QMenu menu(this);
-    QAction *aOpen    = menu.addAction(tr("Open"));
-    QAction *aOpenWith = menu.addAction(tr("Open With…"));
+    QAction *aOpen     = menu.addAction(tr("Open"));
+
+    /* Open With submenu populated from the FileTypeActions registry if
+     * available. Falls back to the old ad-hoc dialog if not. */
+    QMenu   *openWith  = nullptr;
+    QAction *aOpenWithRaw = nullptr;
+    if (single && m_fileTypeActions) {
+        const auto apps = m_fileTypeActions->actionsFor(first);
+        if (!apps.isEmpty()) {
+            openWith = menu.addMenu(tr("Open With"));
+            m_fileTypeActions->populateMenu(openWith, first, this);
+            openWith->addSeparator();
+        }
+    }
+    if (!openWith) {
+        aOpenWithRaw = menu.addAction(tr("Open With…"));
+        aOpenWithRaw->setEnabled(single);
+    }
+
     QAction *aReveal  = menu.addAction(tr("Reveal in Files"));
     QAction *aCopy    = menu.addAction(tr("Copy Path"));
     menu.addSeparator();
@@ -448,7 +481,6 @@ void ListerWidget::onContextMenu(const QPoint &pos) {
     QAction *aTrash   = menu.addAction(tr("Move to Trash"));
 
     aRename->setEnabled(single);
-    aOpenWith->setEnabled(single);
 
     QAction *chosen = menu.exec(m_view->viewport()->mapToGlobal(pos));
     if (!chosen) return;
@@ -462,8 +494,7 @@ void ListerWidget::onContextMenu(const QPoint &pos) {
             for (const QString &p : paths)
                 QDesktopServices::openUrl(QUrl::fromLocalFile(p));
         }
-    } else if (chosen == aOpenWith) {
-        // TODO: proper Open With picker (.desktop entries)
+    } else if (aOpenWithRaw && chosen == aOpenWithRaw) {
         bool ok;
         QString cmd = QInputDialog::getText(this, tr("Open With"),
             tr("Command:"), QLineEdit::Normal, QString(), &ok);

@@ -1,28 +1,35 @@
 #include "MainWindow.h"
 #include "ListerWidget.h"
 #include "ButtonBank.h"
+#include "FileTypeActions.h"
 
 #include <QAction>
 #include <QApplication>
 #include <QBoxLayout>
+#include <QCheckBox>
 #include <QDateTime>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
 #include <QFile>
+#include <QFileDialog>
 #include <QFileInfo>
+#include <QFormLayout>
 #include <QInputDialog>
 #include <QKeySequence>
 #include <QLabel>
+#include <QLineEdit>
 #include <QListWidget>
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QProcess>
 #include <QPushButton>
 #include <QSettings>
 #include <QShortcut>
 #include <QSplitter>
 #include <QStandardPaths>
+#include <QUrl>
 
 static bool copyRecursive(const QString &src, const QString &dst) {
     QFileInfo si(src);
@@ -58,9 +65,12 @@ static bool moveItem(const QString &src, const QString &dst) {
 MainWindow::MainWindow(const QString &leftPath, const QString &rightPath,
                        QWidget *parent)
     : QMainWindow(parent) {
-    m_left  = new ListerWidget(leftPath,  this);
-    m_right = new ListerWidget(rightPath, this);
-    m_bank  = new ButtonBank(this);
+    m_ftypes = new FileTypeActions(this);
+    m_left   = new ListerWidget(leftPath,  this);
+    m_right  = new ListerWidget(rightPath, this);
+    m_left->setFileTypeActions(m_ftypes);
+    m_right->setFileTypeActions(m_ftypes);
+    m_bank   = new ButtonBank(this);
 
     auto *splitter = new QSplitter(Qt::Horizontal, this);
     splitter->addWidget(m_left);
@@ -91,6 +101,9 @@ MainWindow::MainWindow(const QString &leftPath, const QString &rightPath,
     connect(m_bank, &ButtonBank::makeDirClicked, this, [this]{ if (m_active) doMakeDir(m_active); });
     connect(m_bank, &ButtonBank::infoClicked,    this, [this]{ if (m_active) doInfo(m_active);    });
     connect(m_bank, &ButtonBank::filterClicked,  this, [this]{ if (m_active) doFilter(m_active);  });
+    connect(m_bank, &ButtonBank::customTriggered, this, &MainWindow::runCustomCommand);
+    connect(m_bank, &ButtonBank::manageCustomRequested,
+            this, &MainWindow::manageCustomButtons);
 
     connect(qApp, &QApplication::focusChanged,
             this, &MainWindow::onFocusChanged);
@@ -163,6 +176,18 @@ void MainWindow::buildMenuBar() {
 
     m_bookmarksMenu = bar->addMenu(tr("&Bookmarks"));
     rebuildBookmarksMenu();
+
+    auto *toolsMenu = bar->addMenu(tr("&Tools"));
+    auto *actFilter = toolsMenu->addAction(tr("&Filter…"));
+    actFilter->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+F")));
+    connect(actFilter, &QAction::triggered, this,
+            [this]{ if (m_active) doFilter(m_active); });
+
+    toolsMenu->addSeparator();
+    auto *actBtns = toolsMenu->addAction(tr("Manage Custom &Buttons…"));
+    connect(actBtns, &QAction::triggered, this, &MainWindow::manageCustomButtons);
+    auto *actFT   = toolsMenu->addAction(tr("Manage File Type &Actions…"));
+    connect(actFT, &QAction::triggered, this, &MainWindow::manageFileTypeActions);
 }
 
 void MainWindow::rebuildBookmarksMenu() {
@@ -506,12 +531,301 @@ void MainWindow::doInfo(ListerWidget *src) {
 
 void MainWindow::doFilter(ListerWidget *src) {
     if (!src) return;
-    bool ok;
-    QString pattern = QInputDialog::getText(this, tr("Filter"),
-        tr("Show pattern (glob, e.g. *.txt — empty clears filter):"),
-        QLineEdit::Normal, QString(), &ok);
-    if (!ok) return;
-    src->setShowPattern(pattern);
+
+    QDialog dlg(this);
+    dlg.setWindowTitle(tr("Filter"));
+    dlg.resize(400, 160);
+
+    auto *showEdit  = new QLineEdit(&dlg);
+    showEdit->setPlaceholderText(tr("glob, e.g. *.txt — empty = no show filter"));
+    showEdit->setText(src->currentShowPattern());
+
+    auto *hideDot = new QCheckBox(tr("Hide dotfiles (leading '.')"), &dlg);
+    hideDot->setChecked(src->hideDotfiles());
+
+    auto *form = new QFormLayout;
+    form->addRow(tr("&Show pattern:"), showEdit);
+    form->addRow(QString(), hideDot);
+
+    auto *buttons = new QDialogButtonBox(
+        QDialogButtonBox::Ok | QDialogButtonBox::Cancel |
+        QDialogButtonBox::Reset, &dlg);
+    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    connect(buttons->button(QDialogButtonBox::Reset), &QPushButton::clicked, &dlg, [&]{
+        showEdit->clear();
+        hideDot->setChecked(false);
+    });
+
+    auto *main = new QVBoxLayout(&dlg);
+    main->addLayout(form);
+    main->addStretch(1);
+    main->addWidget(buttons);
+
+    if (dlg.exec() == QDialog::Accepted) {
+        src->setShowPattern(showEdit->text().trimmed());
+        src->setHideDotfiles(hideDot->isChecked());
+    }
+}
+
+/* --- Custom-command execution for user buttons --- */
+
+void MainWindow::runCustomCommand(const QString &command) {
+    if (command.isEmpty() || !m_active) return;
+    const QString path  = m_active->currentPath();
+    const QStringList sel = m_active->selectedPaths();
+
+    auto quoteAll = [](const QStringList &ps) {
+        QStringList out;
+        out.reserve(ps.size());
+        for (const QString &p : ps) {
+            if (p.contains(QLatin1Char(' ')) || p.contains(QLatin1Char('"')))
+                out << QLatin1Char('"') + QString(p).replace(QLatin1Char('"'),
+                                                              QStringLiteral("\\\""))
+                      + QLatin1Char('"');
+            else
+                out << p;
+        }
+        return out.join(QLatin1Char(' '));
+    };
+
+    QString rendered = command;
+    rendered.replace(QStringLiteral("{FILES}"), quoteAll(sel));
+    rendered.replace(QStringLiteral("{PATH}"),  path);
+
+    QStringList tokens = QProcess::splitCommand(rendered);
+    if (tokens.isEmpty()) return;
+    const QString program = tokens.takeFirst();
+    if (!QProcess::startDetached(program, tokens)) {
+        QMessageBox::warning(this, tr("Custom button"),
+            tr("Could not launch:\n%1").arg(command));
+    }
+}
+
+/* --- Custom buttons manager --- */
+
+void MainWindow::manageCustomButtons() {
+    if (!m_bank) return;
+
+    QDialog dlg(this);
+    dlg.setWindowTitle(tr("Custom Buttons"));
+    dlg.resize(560, 360);
+
+    auto *list = new QListWidget(&dlg);
+    auto refresh = [&]{
+        list->clear();
+        for (const auto &b : m_bank->customButtons()) {
+            const QString label = b.label.isEmpty() ? tr("(untitled)") : b.label;
+            list->addItem(QStringLiteral("%1  —  %2").arg(label, b.command));
+        }
+    };
+    refresh();
+
+    auto *addBtn    = new QPushButton(tr("Add…"),    &dlg);
+    auto *editBtn   = new QPushButton(tr("Edit…"),   &dlg);
+    auto *removeBtn = new QPushButton(tr("Remove"),  &dlg);
+
+    auto *sideCol = new QVBoxLayout;
+    sideCol->addWidget(addBtn);
+    sideCol->addWidget(editBtn);
+    sideCol->addWidget(removeBtn);
+    sideCol->addStretch(1);
+
+    auto *row = new QHBoxLayout;
+    row->addWidget(list, 1);
+    row->addLayout(sideCol);
+
+    auto *help = new QLabel(tr(
+        "Placeholders: <b>{FILES}</b> = quoted selection, <b>{PATH}</b> = active "
+        "lister's current directory."), &dlg);
+    help->setWordWrap(true);
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dlg);
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::accept);
+
+    auto *main = new QVBoxLayout(&dlg);
+    main->addWidget(new QLabel(tr("User buttons (saved across sessions):"), &dlg));
+    main->addLayout(row);
+    main->addWidget(help);
+    main->addWidget(buttons);
+
+    auto editDialog = [&](ButtonBank::CustomButton *inout) -> bool {
+        QDialog d(&dlg);
+        d.setWindowTitle(tr("Button"));
+        auto *label = new QLineEdit(inout->label, &d);
+        auto *cmd   = new QLineEdit(inout->command, &d);
+        cmd->setPlaceholderText(QStringLiteral("e.g. notepad.exe {FILES}"));
+
+        auto *form = new QFormLayout;
+        form->addRow(tr("&Label:"),   label);
+        form->addRow(tr("&Command:"), cmd);
+
+        auto *ok = new QDialogButtonBox(
+            QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &d);
+        connect(ok, &QDialogButtonBox::accepted, &d, &QDialog::accept);
+        connect(ok, &QDialogButtonBox::rejected, &d, &QDialog::reject);
+
+        auto *v = new QVBoxLayout(&d);
+        v->addLayout(form);
+        v->addWidget(ok);
+
+        if (d.exec() != QDialog::Accepted) return false;
+        inout->label   = label->text().trimmed();
+        inout->command = cmd->text().trimmed();
+        return !inout->command.isEmpty();
+    };
+
+    connect(addBtn, &QPushButton::clicked, this, [&]{
+        ButtonBank::CustomButton b;
+        if (editDialog(&b)) {
+            m_bank->addCustomButton(b);
+            refresh();
+        }
+    });
+    connect(editBtn, &QPushButton::clicked, this, [&]{
+        int r = list->currentRow();
+        if (r < 0 || r >= m_bank->customButtons().size()) return;
+        ButtonBank::CustomButton b = m_bank->customButtons().at(r);
+        if (editDialog(&b)) {
+            m_bank->replaceCustom(r, b);
+            refresh();
+        }
+    });
+    connect(removeBtn, &QPushButton::clicked, this, [&]{
+        int r = list->currentRow();
+        if (r < 0) return;
+        m_bank->removeCustomAt(r);
+        refresh();
+    });
+
+    dlg.exec();
+}
+
+/* --- File Type Actions manager --- */
+
+void MainWindow::manageFileTypeActions() {
+    if (!m_ftypes) return;
+
+    QDialog dlg(this);
+    dlg.setWindowTitle(tr("File Type Actions"));
+    dlg.resize(640, 400);
+
+    auto *list = new QListWidget(&dlg);
+    auto refresh = [&]{
+        list->clear();
+        for (const auto &a : m_ftypes->actions()) {
+            const QString ext = a.ext.isEmpty() ? tr("*") : a.ext;
+            const QString def = a.isDefault ? QStringLiteral(" ★") : QString();
+            list->addItem(QStringLiteral(".%1%2  —  %3  (%4)")
+                .arg(ext, def, a.title.isEmpty() ? a.command : a.title, a.command));
+        }
+    };
+    refresh();
+
+    auto *addBtn     = new QPushButton(tr("Add…"),      &dlg);
+    auto *editBtn    = new QPushButton(tr("Edit…"),     &dlg);
+    auto *removeBtn  = new QPushButton(tr("Remove"),    &dlg);
+    auto *defaultBtn = new QPushButton(tr("Make default"), &dlg);
+    defaultBtn->setCheckable(true);
+
+    auto *sideCol = new QVBoxLayout;
+    sideCol->addWidget(addBtn);
+    sideCol->addWidget(editBtn);
+    sideCol->addWidget(removeBtn);
+    sideCol->addWidget(defaultBtn);
+    sideCol->addStretch(1);
+
+    auto *row = new QHBoxLayout;
+    row->addWidget(list, 1);
+    row->addLayout(sideCol);
+
+    auto *help = new QLabel(tr(
+        "Extensions match case-insensitively. Leave extension empty for \"any file\". "
+        "Use <b>{FILE}</b> in the command as the file's path placeholder "
+        "(appended automatically if omitted). ★ marks the default action used "
+        "when double-clicking a file of that type."), &dlg);
+    help->setWordWrap(true);
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dlg);
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::accept);
+
+    auto *main = new QVBoxLayout(&dlg);
+    main->addLayout(row);
+    main->addWidget(help);
+    main->addWidget(buttons);
+
+    auto editOne = [&](FileTypeActions::Action *a) -> bool {
+        QDialog d(&dlg);
+        d.setWindowTitle(tr("File type action"));
+
+        auto *ext    = new QLineEdit(a->ext,     &d);
+        auto *title  = new QLineEdit(a->title,   &d);
+        auto *cmd    = new QLineEdit(a->command, &d);
+        auto *isDef  = new QCheckBox(tr("Default action for this extension"), &d);
+        isDef->setChecked(a->isDefault);
+        auto *pick   = new QPushButton(tr("Pick program…"), &d);
+
+        connect(pick, &QPushButton::clicked, &d, [&]{
+            const QString exe = QFileDialog::getOpenFileName(&d, tr("Pick program"));
+            if (exe.isEmpty()) return;
+            QString q = exe.contains(QLatin1Char(' '))
+                ? QLatin1Char('"') + exe + QLatin1Char('"') : exe;
+            if (cmd->text().isEmpty())
+                cmd->setText(q + QStringLiteral(" {FILE}"));
+            else
+                cmd->setText(q + QStringLiteral(" ") + cmd->text());
+        });
+
+        auto *form = new QFormLayout;
+        form->addRow(tr("&Extension:"),  ext);
+        form->addRow(tr("&Title:"),      title);
+        form->addRow(tr("&Command:"),    cmd);
+        form->addRow(QString(),          pick);
+        form->addRow(QString(),          isDef);
+
+        auto *ok = new QDialogButtonBox(
+            QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &d);
+        connect(ok, &QDialogButtonBox::accepted, &d, &QDialog::accept);
+        connect(ok, &QDialogButtonBox::rejected, &d, &QDialog::reject);
+
+        auto *v = new QVBoxLayout(&d);
+        v->addLayout(form);
+        v->addWidget(ok);
+        d.resize(460, 280);
+
+        if (d.exec() != QDialog::Accepted) return false;
+        a->ext       = ext->text().trimmed();
+        if (a->ext.startsWith(QLatin1Char('.'))) a->ext.remove(0, 1);
+        a->title     = title->text().trimmed();
+        a->command   = cmd->text().trimmed();
+        a->isDefault = isDef->isChecked();
+        return !a->command.isEmpty();
+    };
+
+    connect(addBtn, &QPushButton::clicked, this, [&]{
+        FileTypeActions::Action a;
+        if (editOne(&a)) { m_ftypes->addAction(a); refresh(); }
+    });
+    connect(editBtn, &QPushButton::clicked, this, [&]{
+        int r = list->currentRow();
+        if (r < 0) return;
+        FileTypeActions::Action a = m_ftypes->actions().at(r);
+        if (editOne(&a)) { m_ftypes->replace(r, a); refresh(); }
+    });
+    connect(removeBtn, &QPushButton::clicked, this, [&]{
+        int r = list->currentRow();
+        if (r < 0) return;
+        m_ftypes->removeAt(r);
+        refresh();
+    });
+    connect(defaultBtn, &QPushButton::clicked, this, [&]{
+        int r = list->currentRow();
+        if (r < 0) return;
+        m_ftypes->setDefault(r, !m_ftypes->actions().at(r).isDefault);
+        refresh();
+    });
+
+    dlg.exec();
 }
 
 void MainWindow::onDrop(ListerWidget *dest, const QList<QUrl> &urls,

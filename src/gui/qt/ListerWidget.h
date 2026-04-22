@@ -16,6 +16,7 @@ class QObject;
 class QFileSystemWatcher;
 class QTimer;
 class DirBufferModel;
+class FileTypeActions;
 
 class ListerWidget : public QWidget {
     Q_OBJECT
@@ -24,6 +25,12 @@ public:
 
     QString currentPath() const { return m_path; }
     QStringList selectedPaths() const;
+    QString currentShowPattern() const { return m_showPattern; }
+    bool    hideDotfiles() const       { return m_hideDotfiles; }
+
+    /* MainWindow passes in the shared registry so double-click + context
+     * menu can honour user-defined file type actions. May be nullptr. */
+    void setFileTypeActions(FileTypeActions *a) { m_fileTypeActions = a; }
 
 public slots:
     void setPath(const QString &path);
@@ -94,8 +101,9 @@ private:
     QPushButton    *m_filterBtn  = nullptr;
     QLabel         *m_stateBadge  = nullptr;
     QLabel         *m_statusLabel = nullptr;
-    QFileSystemWatcher *m_watcher    = nullptr;
-    QTimer             *m_refreshTimer = nullptr;
+    QFileSystemWatcher *m_watcher       = nullptr;
+    QTimer             *m_refreshTimer  = nullptr;
+    FileTypeActions    *m_fileTypeActions = nullptr;
     bool            m_active      = false;
     QString         m_path;
     QString         m_showPattern;
