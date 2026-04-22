@@ -103,6 +103,23 @@ static void test_sorting(void)
     dir_entry_free(txt); dir_entry_free(mod);
 }
 
+/* Platform-appropriate scratch dir for buffer tests. */
+#ifdef _WIN32
+# define TEST_SCRATCH_DIR      "C:\\Windows\\Temp"
+# define TEST_SCRATCH_MARKER   "C:\\Windows\\Temp\\idopus_core_test_marker"
+# define TEST_CACHE_PATH_1     "C:\\Windows"
+# define TEST_CACHE_PATH_2     "C:\\Users"
+# define TEST_CACHE_PATH_3     "C:\\ProgramData"
+# define TEST_CACHE_PATH_4     "C:\\"
+#else
+# define TEST_SCRATCH_DIR      "/tmp"
+# define TEST_SCRATCH_MARKER   "/tmp/idopus_core_test_marker"
+# define TEST_CACHE_PATH_1     "/tmp"
+# define TEST_CACHE_PATH_2     "/usr"
+# define TEST_CACHE_PATH_3     "/var"
+# define TEST_CACHE_PATH_4     "/etc"
+#endif
+
 /* --- Buffer tests --- */
 static void test_buffer(void)
 {
@@ -113,28 +130,28 @@ static void test_buffer(void)
     CHECK(buf != NULL, "create");
 
     TEST(read_tmp);
-    bool ok = dir_buffer_read(buf, "/tmp");
+    bool ok = dir_buffer_read(buf, TEST_SCRATCH_DIR);
     CHECK(ok && (buf->flags & DBUF_VALID) && buf->stats.total_entries > 0,
-          "read /tmp failed");
+          "read " TEST_SCRATCH_DIR " failed");
 
     TEST(stats_consistent);
     CHECK(buf->stats.total_entries == buf->stats.total_files + buf->stats.total_dirs,
           "entries != files + dirs");
 
     TEST(has_path);
-    CHECK(strcmp(buf->path, "/tmp") == 0, "path wrong");
+    CHECK(strcmp(buf->path, TEST_SCRATCH_DIR) == 0, "path wrong");
 
-    printf("  (found %d files, %d dirs in /tmp)\n",
-           buf->stats.total_files, buf->stats.total_dirs);
+    printf("  (found %d files, %d dirs in %s)\n",
+           buf->stats.total_files, buf->stats.total_dirs, TEST_SCRATCH_DIR);
 
     TEST(find_entry);
     /* Create a known file and look for it */
-    FILE *fp = fopen("/tmp/idopus_core_test_marker", "w");
+    FILE *fp = fopen(TEST_SCRATCH_MARKER, "w");
     if (fp) { fputs("test", fp); fclose(fp); }
-    dir_buffer_read(buf, "/tmp");
+    dir_buffer_read(buf, TEST_SCRATCH_DIR);
     dir_entry_t *found = dir_buffer_find_entry(buf, "idopus_core_test_marker");
     CHECK(found != NULL, "marker file not found");
-    remove("/tmp/idopus_core_test_marker");
+    remove(TEST_SCRATCH_MARKER);
 
     TEST(get_entry_by_index);
     dir_entry_t *first = dir_buffer_get_entry(buf, 0);
@@ -237,26 +254,26 @@ static void test_cache(void)
     CHECK(cache != NULL, "create");
 
     TEST(cache_get_or_create);
-    dir_buffer_t *b1 = buffer_cache_get_or_create(cache, "/tmp");
+    dir_buffer_t *b1 = buffer_cache_get_or_create(cache, TEST_CACHE_PATH_1);
     CHECK(b1 != NULL && cache->count == 1, "first buffer");
 
     TEST(cache_find_existing);
-    dir_buffer_t *b1again = buffer_cache_find(cache, "/tmp");
+    dir_buffer_t *b1again = buffer_cache_find(cache, TEST_CACHE_PATH_1);
     CHECK(b1again == b1, "should find same buffer");
 
     TEST(cache_multiple);
-    buffer_cache_get_or_create(cache, "/usr");
-    buffer_cache_get_or_create(cache, "/var");
+    buffer_cache_get_or_create(cache, TEST_CACHE_PATH_2);
+    buffer_cache_get_or_create(cache, TEST_CACHE_PATH_3);
     CHECK(cache->count == 3, "three buffers");
 
     TEST(cache_eviction);
-    /* Adding a 4th should evict the LRU (b1=/tmp, since /usr and /var are newer) */
-    buffer_cache_get_or_create(cache, "/etc");
+    /* Adding a 4th should evict the LRU (path_1, since path_2 and path_3 are newer) */
+    buffer_cache_get_or_create(cache, TEST_CACHE_PATH_4);
     CHECK(cache->count == 3, "still 3 after eviction");
 
     TEST(cache_lru_evicted);
-    dir_buffer_t *evicted = buffer_cache_find(cache, "/tmp");
-    CHECK(evicted == NULL, "/tmp should be evicted (LRU)");
+    dir_buffer_t *evicted = buffer_cache_find(cache, TEST_CACHE_PATH_1);
+    CHECK(evicted == NULL, TEST_CACHE_PATH_1 " should be evicted (LRU)");
 
     buffer_cache_free(cache);
 }

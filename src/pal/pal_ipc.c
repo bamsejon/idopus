@@ -1,5 +1,5 @@
 /*
- * iDOpus — PAL IPC implementation (macOS/POSIX)
+ * iDOpus — PAL IPC implementation
  *
  * Thread-based message passing that mirrors the Amiga architecture
  * where each Lister ran as its own process with a message port.
@@ -10,6 +10,21 @@
 #include "pal/pal_strings.h"
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+typedef DWORD  pal_thread_ret_t;
+typedef LPVOID pal_thread_arg_t;
+#define PAL_THREAD_CC WINAPI
+#else
+#include <pthread.h>
+typedef void *pal_thread_ret_t;
+typedef void *pal_thread_arg_t;
+#define PAL_THREAD_CC
+#endif
 
 /* Command ID for shutdown */
 #define PAL_IPC_CMD_QUIT  0xFFFFFFFF
@@ -149,13 +164,13 @@ int32_t pal_ipc_command(pal_port_t *port, uint32_t command, void *data, size_t s
 
 /* --- IPC Process (thread with message port) --- */
 
-static void *ipc_thread_func(void *arg)
+static pal_thread_ret_t PAL_THREAD_CC ipc_thread_func(pal_thread_arg_t arg)
 {
     pal_ipc_proc_t *proc = (pal_ipc_proc_t *)arg;
     proc->running = true;
     proc->func(proc->port, proc->userdata);
     proc->running = false;
-    return NULL;
+    return (pal_thread_ret_t)0;
 }
 
 pal_ipc_proc_t *pal_ipc_launch(const char *name, pal_ipc_func_t func, void *userdata)
@@ -172,11 +187,20 @@ pal_ipc_proc_t *pal_ipc_launch(const char *name, pal_ipc_func_t func, void *user
     proc->func = func;
     proc->userdata = userdata;
 
+#ifdef _WIN32
+    proc->thread = CreateThread(NULL, 0, ipc_thread_func, proc, 0, NULL);
+    if (!proc->thread) {
+        pal_port_destroy(proc->port);
+        pal_free(proc);
+        return NULL;
+    }
+#else
     if (pthread_create(&proc->thread, NULL, ipc_thread_func, proc) != 0) {
         pal_port_destroy(proc->port);
         pal_free(proc);
         return NULL;
     }
+#endif
 
     return proc;
 }
@@ -189,7 +213,12 @@ void pal_ipc_shutdown(pal_ipc_proc_t *proc)
     if (quit)
         pal_port_send(proc->port, quit);
     /* Wait for thread to finish */
+#ifdef _WIN32
+    WaitForSingleObject(proc->thread, INFINITE);
+    CloseHandle(proc->thread);
+#else
     pthread_join(proc->thread, NULL);
+#endif
 }
 
 void pal_ipc_free(pal_ipc_proc_t *proc)

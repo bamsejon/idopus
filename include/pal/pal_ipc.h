@@ -24,6 +24,17 @@
 #include "pal_lists.h"
 #include "pal_sync.h"
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+typedef HANDLE pal_thread_handle_t;
+#else
+#include <pthread.h>
+typedef pthread_t pal_thread_handle_t;
+#endif
+
 /* --- Message (replaces Amiga Message + IPCMessage) --- */
 
 typedef struct pal_message {
@@ -74,11 +85,11 @@ int32_t pal_ipc_command(pal_port_t *port, uint32_t command, void *data, size_t s
 typedef void (*pal_ipc_func_t)(pal_port_t *port, void *userdata);
 
 typedef struct pal_ipc_proc {
-    pthread_t      thread;
-    pal_port_t    *port;        /* this process's message port */
-    pal_ipc_func_t func;        /* entry point */
-    void          *userdata;
-    bool           running;
+    pal_thread_handle_t thread;
+    pal_port_t         *port;        /* this process's message port */
+    pal_ipc_func_t      func;        /* entry point */
+    void               *userdata;
+    bool                running;
 } pal_ipc_proc_t;
 
 pal_ipc_proc_t *pal_ipc_launch(const char *name, pal_ipc_func_t func, void *userdata);

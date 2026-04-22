@@ -26,8 +26,14 @@ int  pal_strnicmp(const char *a, const char *b, size_t n);
 
 /* --- Formatting (replaces lsprintf) --- */
 
+#if defined(__GNUC__) || defined(__clang__)
+#define PAL_PRINTF_FMT(a, b) __attribute__((format(printf, a, b)))
+#else
+#define PAL_PRINTF_FMT(a, b)
+#endif
+
 int  pal_sprintf(char *buf, size_t size, const char *fmt, ...)
-     __attribute__((format(printf, 3, 4)));
+     PAL_PRINTF_FMT(3, 4);
 
 /* --- Utility --- */
 
