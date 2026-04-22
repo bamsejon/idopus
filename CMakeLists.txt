@@ -18,15 +18,29 @@ endif()
 include_directories(${CMAKE_SOURCE_DIR}/include)
 
 # --- Platform Abstraction Layer (PAL) ---
-add_library(pal STATIC
+set(PAL_SOURCES
     src/pal/pal_memory.c
     src/pal/pal_lists.c
-    src/pal/pal_sync.c
     src/pal/pal_ipc.c
     src/pal/pal_strings.c
-    src/pal/pal_file.c
 )
-target_link_libraries(pal PRIVATE pthread)
+if(WIN32)
+    list(APPEND PAL_SOURCES
+        src/pal/pal_sync_win32.c
+        src/pal/pal_file_win32.c)
+else()
+    list(APPEND PAL_SOURCES
+        src/pal/pal_sync.c
+        src/pal/pal_file.c)
+endif()
+
+add_library(pal STATIC ${PAL_SOURCES})
+if(WIN32)
+    # shell32 for SHFileOperation (only if used); advapi32 default-linked in MSVC
+    target_link_libraries(pal PRIVATE shell32)
+else()
+    target_link_libraries(pal PRIVATE pthread)
+endif()
 
 # --- Core library ---
 add_library(core STATIC
@@ -123,13 +137,21 @@ if(NOT APPLE)
                 src/gui/qt/ButtonBank.cpp
                 src/gui/qt/ButtonBank.h
             )
+            if(WIN32)
+                set(IDOPUS_QT_WIN32 ON)
+            else()
+                set(IDOPUS_QT_WIN32 OFF)
+            endif()
             set_target_properties(idopus-qt PROPERTIES
                 AUTOMOC ON
-                WIN32_EXECUTABLE OFF
+                WIN32_EXECUTABLE ${IDOPUS_QT_WIN32}
                 MACOSX_BUNDLE OFF
             )
             target_link_libraries(idopus-qt PRIVATE
-                core pal Qt6::Widgets pthread)
+                core pal Qt6::Widgets)
+            if(NOT WIN32)
+                target_link_libraries(idopus-qt PRIVATE pthread)
+            endif()
         else()
             message(STATUS "Qt6 not found — skipping idopus-qt target")
         endif()
