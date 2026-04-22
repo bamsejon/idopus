@@ -1,10 +1,14 @@
 # iDOpus
 
-**A modern macOS file manager, ported from the legendary Directory Opus 5 Magellan (Amiga, 1995).**
+**A modern dual-pane file manager for macOS, Linux, and Windows — ported from the legendary Directory Opus 5 Magellan (Amiga, 1995).**
 
-iDOpus brings the classic dual-pane file manager experience from the Commodore Amiga to modern macOS on Apple Silicon. The original Directory Opus 5 Magellan was released as open source under the AROS Public License in 2012, and this project builds on that codebase.
+iDOpus brings the classic DOpus experience to today's desktops. The original Directory Opus 5 Magellan was released as open source under the AROS Public License in 2012, and this project builds on that codebase.
 
-A Qt 6 build (`idopus-qt`) additionally targets Linux desktops (tested on KDE Plasma). See *Building on Linux* below for its current feature set — it's a minimal MVP, not full macOS parity.
+- **macOS (Apple Silicon)** — full-featured AppKit build (`iDOpus.app`). This is the flagship target.
+- **Linux** — Qt 6 build (`idopus-qt`), tested on KDE Plasma. Tracks macOS feature parity iteration by iteration.
+- **Windows 10/11 (x64)** — same Qt 6 codebase, MSVC build. Shipped as an Inno Setup installer (`iDOpus-<version>-Setup.exe`).
+
+See the *Feature matrix* below for the exact status per platform — the Qt build is still catching up to macOS.
 
 ![iDOpus screenshot — two Listers with Button Bank between them, thumbnails and breadcrumb paths](docs/screenshot.png)
 
@@ -28,6 +32,18 @@ Optional — to skip all macOS TCC privacy prompts ("iDOpus wants to access your
 System Settings → Privacy & Security → **Full Disk Access** → `+` → `/Applications/iDOpus.app`.
 
 Requires macOS 13 (Ventura) or later on Apple Silicon (M1/M2/M3/M4).
+
+## Download & install (Windows 10/11, x64)
+
+1. Grab the latest `iDOpus-<version>-Setup.exe` from [**Releases**](https://github.com/bamsejon/idopus/releases/latest).
+2. Run it. The installer is Inno Setup–based and walks you through the usual Program Files install, optional desktop shortcut, and an optional *Open with iDOpus* right-click entry for folders.
+3. The first time SmartScreen sees the unsigned `.exe` it'll warn about it. Click **More info** → **Run anyway** (until the project has a signing cert).
+
+Everything the app needs — the Qt runtime, the MSVC redistributable DLLs — is bundled inside the installer; no separate Qt/VS download.
+
+## Download & install (Linux)
+
+Prebuilt Linux packages aren't yet published. Build from source (quick; see *Building on Linux* below). The Qt `idopus-qt` binary drops into any Qt 6.5+ desktop without further setup.
 
 ## Features
 
@@ -141,11 +157,11 @@ The source is derived from [Directory Opus 5.82 Magellan](https://github.com/MrZ
 
 Clean-room port guided by the original source in `original-amiga-source/`. Amiga subsystems are replaced by their macOS equivalents rather than emulated.
 
-| Amiga layer | macOS replacement | Status |
+| Amiga layer | Modern replacement | Status |
 |---|---|---|
-| `exec.library` (memory, IPC, signals) | `malloc`/GCD/`pthread_mutex` via PAL | ✅ |
-| `dos.library` (file I/O, paths, patterns) | POSIX + Foundation via PAL | ✅ |
-| Intuition / BOOPSI GUI | AppKit (`NSWindow`, `NSTableView`, `NSPanel`) on macOS; Qt 6 Widgets (`QMainWindow`, `QTreeView`) on Linux | ✅ |
+| `exec.library` (memory, IPC, signals) | PAL: `malloc` + pthreads on POSIX, `HANDLE` + `CRITICAL_SECTION`/`SRWLOCK`/`CONDITION_VARIABLE` on Windows | ✅ |
+| `dos.library` (file I/O, paths, patterns) | PAL: POSIX + Foundation on macOS/Linux, `FindFirstFileW` + `MoveFileExW` + UTF-16 on Windows | ✅ |
+| Intuition / BOOPSI GUI | AppKit (`NSWindow`, `NSTableView`, `NSPanel`) on macOS; Qt 6 Widgets (`QMainWindow`, `QTreeView`) on Linux + Windows | ✅ |
 | DOpus Lister + source/dest model | `ListerWindowController` state | ✅ |
 | DOpus Button Bank | floating non-activating `NSPanel` | ✅ (+ user-custom buttons) |
 | DOpus file types + actions | per-extension shell commands stored in defaults | ✅ |
@@ -201,7 +217,50 @@ Run the PAL and core test suites:
 ./build/pal_test && ./build/core_test
 ```
 
-The macOS AppKit target is skipped automatically on non-Apple platforms. The Qt/Linux build covers dual-pane navigation with sortable headers, filter + dotfile toggle, drag-and-drop (between Listers and with Nautilus/Dolphin), a right-click context menu, and Select By Pattern (`Ctrl+Shift+A`). Quick Look, background progress, file type actions, bookmarks, and tabs remain macOS-only for now.
+The macOS AppKit target is skipped automatically on non-Apple platforms. The Qt/Linux build covers dual-pane navigation with sortable headers, per-pane back/forward history, live refresh via `QFileSystemWatcher`, bookmarks menu, filter + dotfile toggle, drag-and-drop (between Listers and with Nautilus/Dolphin), a right-click context menu, and Select By Pattern (`Ctrl+Shift+A`). Quick Look, background progress jobs, file type actions, and tabs remain macOS-only for now — they're coming through iteration by iteration (see the `windows/iter-*` branches).
+
+## Building on Windows (Qt 6 + MSVC)
+
+Requires Visual Studio 2022 Build Tools (with "Desktop development with C++" workload), CMake (3.20+), and Qt 6.5+ for MSVC x64. A convenient way to install them from PowerShell:
+
+```
+winget install Microsoft.VisualStudio.2022.BuildTools --silent --override `
+  "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --add Microsoft.VisualStudio.Component.Windows11SDK.22621"
+winget install Kitware.CMake --silent
+winget install Git.Git --silent
+winget install Python.Python.3.12 --silent    # only needed if you want aqtinstall
+python -m pip install aqtinstall
+python -m aqt install-qt windows desktop 6.8.3 win64_msvc2022_64 --outputdir C:\Qt
+```
+
+Clone, configure, build:
+
+```
+git clone https://github.com/bamsejon/idopus.git
+cd idopus
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_PREFIX_PATH="C:\Qt\6.8.3\msvc2022_64"
+cmake --build build --config Release
+```
+
+Stage the Qt runtime DLLs next to the binary (required before running standalone):
+
+```
+C:\Qt\6.8.3\msvc2022_64\bin\windeployqt.exe --release --no-translations `
+  --no-system-d3d-compiler --no-opengl-sw .\build\Release\idopus-qt.exe
+```
+
+Now run `.\build\Release\idopus-qt.exe` or go one step further and build an installer locally:
+
+```
+# Inno Setup 6 must be installed first — choco install innosetup -y
+"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
+  "/DIdopusVersion=1.8.0" `
+  "/DIdopusSourceDir=$(Resolve-Path .\build\Release)" `
+  packaging\windows\idopus.iss
+# Output: packaging\windows\build-installer\iDOpus-1.8.0-Setup.exe
+```
+
+The same build runs in CI on every `v*` tag (see `.github/workflows/windows-release.yml`) and attaches the installer to the GitHub release automatically.
 
 ## License
 

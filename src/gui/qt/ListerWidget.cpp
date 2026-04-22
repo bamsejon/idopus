@@ -25,6 +25,8 @@
 #include <QDropEvent>
 #include <QMimeData>
 #include <QGuiApplication>
+#include <QFileSystemWatcher>
+#include <QTimer>
 
 extern "C" {
 #include "core/dir_entry.h"
@@ -55,11 +57,17 @@ ListerWidget::ListerWidget(const QString &initialPath, QWidget *parent)
     connect(m_view->selectionModel(), &QItemSelectionModel::selectionChanged,
             this, [this](const QItemSelection&, const QItemSelection&) { updateStatus(); });
 
-    /* --- Path row: Parent ↑, Refresh ↻, path QLineEdit --- */
+    /* --- Path row: Back ←, Fwd →, Parent ↑, Refresh ↻, path QLineEdit --- */
+    m_backBtn    = makeButton(QStringLiteral("←"), false);
+    m_fwdBtn     = makeButton(QStringLiteral("→"), false);
     m_parentBtn  = makeButton(QStringLiteral("↑"), true);
     m_refreshBtn = makeButton(QStringLiteral("↻"), true);
-    m_parentBtn->setFixedWidth(32);
-    m_refreshBtn->setFixedWidth(32);
+    m_backBtn->setFixedWidth(32);    m_backBtn->setToolTip(tr("Back (Alt+Left)"));
+    m_fwdBtn->setFixedWidth(32);     m_fwdBtn->setToolTip(tr("Forward (Alt+Right)"));
+    m_parentBtn->setFixedWidth(32);  m_parentBtn->setToolTip(tr("Parent (Alt+Up)"));
+    m_refreshBtn->setFixedWidth(32); m_refreshBtn->setToolTip(tr("Refresh"));
+    connect(m_backBtn,    &QPushButton::clicked, this, &ListerWidget::goBack);
+    connect(m_fwdBtn,     &QPushButton::clicked, this, &ListerWidget::goForward);
     connect(m_parentBtn,  &QPushButton::clicked, this, &ListerWidget::goParent);
     connect(m_refreshBtn, &QPushButton::clicked, this, &ListerWidget::refresh);
 
@@ -70,6 +78,8 @@ ListerWidget::ListerWidget(const QString &initialPath, QWidget *parent)
     auto *pathRow = new QHBoxLayout;
     pathRow->setContentsMargins(0, 0, 0, 0);
     pathRow->setSpacing(4);
+    pathRow->addWidget(m_backBtn);
+    pathRow->addWidget(m_fwdBtn);
     pathRow->addWidget(m_parentBtn);
     pathRow->addWidget(m_refreshBtn);
     pathRow->addWidget(m_pathField, 1);
@@ -165,10 +175,26 @@ ListerWidget::ListerWidget(const QString &initialPath, QWidget *parent)
     m_view->setDefaultDropAction(Qt::CopyAction);
     m_view->viewport()->installEventFilter(this);
 
-    /* Keyboard: Alt+Up still triggers goParent on the focused pane */
-    auto *sc = new QShortcut(QKeySequence(Qt::ALT | Qt::Key_Up), this);
-    sc->setContext(Qt::WidgetWithChildrenShortcut);
-    connect(sc, &QShortcut::activated, this, &ListerWidget::goParent);
+    /* Keyboard navigation: Alt+Up/Left/Right */
+    auto addSC = [this](const QKeySequence &seq, void (ListerWidget::*handler)()) {
+        auto *sc = new QShortcut(seq, this);
+        sc->setContext(Qt::WidgetWithChildrenShortcut);
+        connect(sc, &QShortcut::activated, this, handler);
+    };
+    addSC(QKeySequence(Qt::ALT | Qt::Key_Up),    &ListerWidget::goParent);
+    addSC(QKeySequence(Qt::ALT | Qt::Key_Left),  &ListerWidget::goBack);
+    addSC(QKeySequence(Qt::ALT | Qt::Key_Right), &ListerWidget::goForward);
+
+    /* Live refresh: QFileSystemWatcher + debounced 250ms timer so rapid
+     * bursts of change events collapse into a single refresh(). */
+    m_watcher = new QFileSystemWatcher(this);
+    connect(m_watcher, &QFileSystemWatcher::directoryChanged,
+            this,      &ListerWidget::onWatchedDirChanged);
+    m_refreshTimer = new QTimer(this);
+    m_refreshTimer->setSingleShot(true);
+    m_refreshTimer->setInterval(250);
+    connect(m_refreshTimer, &QTimer::timeout,
+            this,           &ListerWidget::fireDebouncedRefresh);
 
     setActive(false);
     setPath(initialPath);
@@ -206,12 +232,32 @@ void ListerWidget::setActive(bool active) {
 }
 
 void ListerWidget::setPath(const QString &path) {
+    setPathInternal(path, /* recordHistory = */ true);
+}
+
+void ListerWidget::setPathInternal(const QString &path, bool recordHistory) {
+    if (recordHistory && path != m_path) {
+        /* Chop any forward history past the current position, then push. */
+        if (m_historyIndex >= 0 && m_historyIndex + 1 < m_history.size())
+            m_history.erase(m_history.begin() + m_historyIndex + 1, m_history.end());
+        m_history.append(path);
+        m_historyIndex = m_history.size() - 1;
+        /* Keep the stack bounded so it doesn't grow forever. */
+        const int kMaxHistory = 128;
+        if (m_history.size() > kMaxHistory) {
+            m_history.removeFirst();
+            --m_historyIndex;
+        }
+    }
     m_path = path;
     m_model->setPath(path);
     if (m_pathField) m_pathField->setText(path);
     m_view->resizeColumnToContents(DirBufferModel::ColName);
     m_view->resizeColumnToContents(DirBufferModel::ColSize);
+    rewatch(path);
+    updateNavButtons();
     emit pathChanged(m_path);
+    emit historyChanged();
     updateStatus();
 }
 
@@ -228,11 +274,60 @@ void ListerWidget::goHome() {
 }
 
 void ListerWidget::goRoot() {
+#ifdef Q_OS_WIN
+    /* "Root" on Windows is ambiguous — take the current drive's root. */
+    if (!m_path.isEmpty() && m_path.size() >= 2 && m_path[1] == QChar(':')) {
+        setPath(m_path.left(2) + QLatin1Char('/'));
+        return;
+    }
+    setPath(QStringLiteral("C:/"));
+#else
     setPath(QStringLiteral("/"));
+#endif
+}
+
+void ListerWidget::goBack() {
+    if (!canGoBack()) return;
+    --m_historyIndex;
+    setPathInternal(m_history[m_historyIndex], /* recordHistory = */ false);
+}
+
+void ListerWidget::goForward() {
+    if (!canGoForward()) return;
+    ++m_historyIndex;
+    setPathInternal(m_history[m_historyIndex], /* recordHistory = */ false);
 }
 
 void ListerWidget::refresh() {
-    setPath(m_path);
+    /* Just reload the model; don't churn history. */
+    setPathInternal(m_path, /* recordHistory = */ false);
+}
+
+void ListerWidget::updateNavButtons() {
+    if (m_backBtn) m_backBtn->setEnabled(canGoBack());
+    if (m_fwdBtn)  m_fwdBtn->setEnabled(canGoForward());
+}
+
+void ListerWidget::rewatch(const QString &path) {
+    if (!m_watcher) return;
+    const QStringList watching = m_watcher->directories();
+    if (!watching.isEmpty()) m_watcher->removePaths(watching);
+    if (!path.isEmpty()) m_watcher->addPath(path);
+}
+
+void ListerWidget::onWatchedDirChanged(const QString &path) {
+    Q_UNUSED(path);
+    if (m_refreshTimer) m_refreshTimer->start();
+}
+
+void ListerWidget::fireDebouncedRefresh() {
+    /* Only refresh if the watched dir still matches the current path. */
+    const QStringList watching = m_watcher ? m_watcher->directories() : QStringList{};
+    if (watching.contains(m_path)) {
+        refresh();
+    } else if (!m_path.isEmpty()) {
+        rewatch(m_path);
+    }
 }
 
 void ListerWidget::selectAll()  { m_view->selectAll(); }

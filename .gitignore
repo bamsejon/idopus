@@ -22,3 +22,4 @@ xcuserdata/
 third_party/rclone/rclone
 third_party/rclone/LICENSE
 third_party/rclone/VERSION
+._*

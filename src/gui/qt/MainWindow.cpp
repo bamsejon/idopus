@@ -2,16 +2,27 @@
 #include "ListerWidget.h"
 #include "ButtonBank.h"
 
+#include <QAction>
 #include <QApplication>
+#include <QBoxLayout>
 #include <QDateTime>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QInputDialog>
 #include <QKeySequence>
+#include <QLabel>
+#include <QListWidget>
+#include <QMenu>
+#include <QMenuBar>
 #include <QMessageBox>
+#include <QPushButton>
+#include <QSettings>
 #include <QShortcut>
 #include <QSplitter>
+#include <QStandardPaths>
 
 static bool copyRecursive(const QString &src, const QString &dst) {
     QFileInfo si(src);
@@ -108,7 +119,193 @@ MainWindow::MainWindow(const QString &leftPath, const QString &rightPath,
         if (ok && !p.isEmpty()) m_active->selectByPattern(p);
     });
 
+    loadBookmarks();
+    buildMenuBar();
+
     setActive(m_left);
+}
+
+/* --- Menu bar + bookmarks --- */
+
+void MainWindow::buildMenuBar() {
+    auto *bar = menuBar();
+
+    auto *viewMenu = bar->addMenu(tr("&Go"));
+    auto *actBack = viewMenu->addAction(tr("&Back"));
+    actBack->setShortcut(QKeySequence(Qt::ALT | Qt::Key_Left));
+    connect(actBack, &QAction::triggered, this,
+            [this]{ if (m_active) m_active->goBack(); });
+
+    auto *actFwd = viewMenu->addAction(tr("&Forward"));
+    actFwd->setShortcut(QKeySequence(Qt::ALT | Qt::Key_Right));
+    connect(actFwd, &QAction::triggered, this,
+            [this]{ if (m_active) m_active->goForward(); });
+
+    auto *actUp = viewMenu->addAction(tr("&Parent"));
+    actUp->setShortcut(QKeySequence(Qt::ALT | Qt::Key_Up));
+    connect(actUp, &QAction::triggered, this,
+            [this]{ if (m_active) m_active->goParent(); });
+
+    viewMenu->addSeparator();
+    auto *actHome = viewMenu->addAction(tr("&Home"));
+    actHome->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+H")));
+    connect(actHome, &QAction::triggered, this,
+            [this]{ if (m_active) m_active->goHome(); });
+
+    auto *actRoot = viewMenu->addAction(tr("&Root"));
+    connect(actRoot, &QAction::triggered, this,
+            [this]{ if (m_active) m_active->goRoot(); });
+
+    auto *actRefresh = viewMenu->addAction(tr("Re&fresh"));
+    actRefresh->setShortcut(QKeySequence(QStringLiteral("Ctrl+R")));
+    connect(actRefresh, &QAction::triggered, this,
+            [this]{ if (m_active) m_active->refresh(); });
+
+    m_bookmarksMenu = bar->addMenu(tr("&Bookmarks"));
+    rebuildBookmarksMenu();
+}
+
+void MainWindow::rebuildBookmarksMenu() {
+    if (!m_bookmarksMenu) return;
+    m_bookmarksMenu->clear();
+
+    auto *addAct = m_bookmarksMenu->addAction(tr("Add &Current Path"));
+    addAct->setShortcut(QKeySequence(QStringLiteral("Ctrl+D")));
+    connect(addAct, &QAction::triggered, this, &MainWindow::addBookmarkForActive);
+
+    auto *manageAct = m_bookmarksMenu->addAction(tr("&Manage Bookmarks…"));
+    connect(manageAct, &QAction::triggered, this, &MainWindow::manageBookmarks);
+
+    if (!m_bookmarks.isEmpty()) m_bookmarksMenu->addSeparator();
+
+    for (const auto &b : m_bookmarks) {
+        const QString label = b.first.isEmpty() ? b.second : b.first;
+        const QString path  = b.second;
+        auto *act = m_bookmarksMenu->addAction(label);
+        act->setToolTip(path);
+        connect(act, &QAction::triggered, this,
+                [this, path]{ if (m_active) m_active->setPath(path); });
+    }
+}
+
+void MainWindow::addBookmarkForActive() {
+    if (!m_active) return;
+    const QString path = m_active->currentPath();
+    if (path.isEmpty()) return;
+    /* Dedupe by path. */
+    for (const auto &b : m_bookmarks)
+        if (b.second == path) return;
+
+    bool ok;
+    QString title = QInputDialog::getText(this, tr("Add Bookmark"),
+        tr("Title (optional):"), QLineEdit::Normal,
+        QFileInfo(path).fileName(), &ok);
+    if (!ok) return;
+    m_bookmarks.append(qMakePair(title.trimmed(), path));
+    saveBookmarks();
+    rebuildBookmarksMenu();
+}
+
+void MainWindow::manageBookmarks() {
+    QDialog dlg(this);
+    dlg.setWindowTitle(tr("Manage Bookmarks"));
+    dlg.resize(480, 320);
+
+    auto *list = new QListWidget(&dlg);
+    for (const auto &b : m_bookmarks) {
+        const QString label = b.first.isEmpty() ? b.second : b.first;
+        list->addItem(QStringLiteral("%1  —  %2").arg(label, b.second));
+    }
+
+    auto *btnRemove = new QPushButton(tr("Remove"), &dlg);
+    auto *btnUp     = new QPushButton(tr("Up"),     &dlg);
+    auto *btnDown   = new QPushButton(tr("Down"),   &dlg);
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dlg);
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::accept);
+
+    auto *sideCol = new QVBoxLayout;
+    sideCol->addWidget(btnRemove);
+    sideCol->addWidget(btnUp);
+    sideCol->addWidget(btnDown);
+    sideCol->addStretch(1);
+
+    auto *row = new QHBoxLayout;
+    row->addWidget(list, 1);
+    row->addLayout(sideCol);
+
+    auto *main = new QVBoxLayout(&dlg);
+    main->addWidget(new QLabel(tr("Select a bookmark:"), &dlg));
+    main->addLayout(row);
+    main->addWidget(buttons);
+
+    auto refreshList = [&]{
+        list->clear();
+        for (const auto &b : m_bookmarks) {
+            const QString label = b.first.isEmpty() ? b.second : b.first;
+            list->addItem(QStringLiteral("%1  —  %2").arg(label, b.second));
+        }
+    };
+
+    connect(btnRemove, &QPushButton::clicked, this, [&]{
+        int r = list->currentRow();
+        if (r < 0 || r >= m_bookmarks.size()) return;
+        m_bookmarks.removeAt(r);
+        refreshList();
+    });
+    connect(btnUp, &QPushButton::clicked, this, [&]{
+        int r = list->currentRow();
+        if (r <= 0) return;
+        m_bookmarks.swapItemsAt(r, r - 1);
+        refreshList();
+        list->setCurrentRow(r - 1);
+    });
+    connect(btnDown, &QPushButton::clicked, this, [&]{
+        int r = list->currentRow();
+        if (r < 0 || r + 1 >= m_bookmarks.size()) return;
+        m_bookmarks.swapItemsAt(r, r + 1);
+        refreshList();
+        list->setCurrentRow(r + 1);
+    });
+
+    dlg.exec();
+    saveBookmarks();
+    rebuildBookmarksMenu();
+}
+
+void MainWindow::loadBookmarks() {
+    QSettings s;
+    int n = s.beginReadArray(QStringLiteral("bookmarks"));
+    m_bookmarks.clear();
+    m_bookmarks.reserve(n);
+    for (int i = 0; i < n; ++i) {
+        s.setArrayIndex(i);
+        const QString title = s.value(QStringLiteral("title")).toString();
+        const QString path  = s.value(QStringLiteral("path")).toString();
+        if (!path.isEmpty()) m_bookmarks.append(qMakePair(title, path));
+    }
+    s.endArray();
+
+    if (m_bookmarks.isEmpty()) {
+        /* Seed with sensible defaults so the menu isn't empty on first run. */
+        const QString home = QStandardPaths::writableLocation(QStandardPaths::HomeLocation);
+        const QString docs = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
+        const QString dl   = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+        if (!home.isEmpty()) m_bookmarks.append(qMakePair(tr("Home"),     home));
+        if (!docs.isEmpty()) m_bookmarks.append(qMakePair(tr("Documents"), docs));
+        if (!dl.isEmpty())   m_bookmarks.append(qMakePair(tr("Downloads"), dl));
+    }
+}
+
+void MainWindow::saveBookmarks() {
+    QSettings s;
+    s.beginWriteArray(QStringLiteral("bookmarks"), m_bookmarks.size());
+    for (int i = 0; i < m_bookmarks.size(); ++i) {
+        s.setArrayIndex(i);
+        s.setValue(QStringLiteral("title"), m_bookmarks[i].first);
+        s.setValue(QStringLiteral("path"),  m_bookmarks[i].second);
+    }
+    s.endArray();
 }
 
 void MainWindow::wireLister(ListerWidget *l) {
