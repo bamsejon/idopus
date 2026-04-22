@@ -2,6 +2,9 @@
 #include "ListerWidget.h"
 #include "ButtonBank.h"
 #include "FileTypeActions.h"
+#include "FileJob.h"
+#include "JobsPanel.h"
+#include "PreferencesDialog.h"
 
 #include <QAction>
 #include <QApplication>
@@ -31,37 +34,6 @@
 #include <QStandardPaths>
 #include <QUrl>
 
-static bool copyRecursive(const QString &src, const QString &dst) {
-    QFileInfo si(src);
-    if (si.isSymLink()) {
-        QFile::link(si.symLinkTarget(), dst);
-        return true;
-    }
-    if (si.isDir()) {
-        if (!QDir().mkpath(dst)) return false;
-        QDir d(src);
-        const auto entries = d.entryList(QDir::NoDotAndDotDot | QDir::AllEntries
-                                          | QDir::Hidden | QDir::System);
-        for (const QString &name : entries) {
-            if (!copyRecursive(src + '/' + name, dst + '/' + name)) return false;
-        }
-        return true;
-    }
-    return QFile::copy(src, dst);
-}
-
-static bool removeAny(const QString &path) {
-    QFileInfo fi(path);
-    if (fi.isDir() && !fi.isSymLink()) return QDir(path).removeRecursively();
-    return QFile::remove(path);
-}
-
-static bool moveItem(const QString &src, const QString &dst) {
-    if (QFile::rename(src, dst)) return true;
-    if (!copyRecursive(src, dst)) return false;
-    return removeAny(src);
-}
-
 MainWindow::MainWindow(const QString &leftPath, const QString &rightPath,
                        QWidget *parent)
     : QMainWindow(parent) {
@@ -71,6 +43,14 @@ MainWindow::MainWindow(const QString &leftPath, const QString &rightPath,
     m_left->setFileTypeActions(m_ftypes);
     m_right->setFileTypeActions(m_ftypes);
     m_bank   = new ButtonBank(this);
+    m_jobs   = new JobsPanel(this);
+    addDockWidget(Qt::BottomDockWidgetArea, m_jobs);
+    m_jobs->hide();   /* appears automatically when a job is queued */
+
+    connect(m_jobs, &JobsPanel::jobFinished, this, [this](FileJob *) {
+        if (m_left)  m_left->refresh();
+        if (m_right) m_right->refresh();
+    });
 
     auto *splitter = new QSplitter(Qt::Horizontal, this);
     splitter->addWidget(m_left);
@@ -134,6 +114,7 @@ MainWindow::MainWindow(const QString &leftPath, const QString &rightPath,
 
     loadBookmarks();
     buildMenuBar();
+    applyPreferences();   /* pull stored Preferences into the UI at startup */
 
     setActive(m_left);
 }
@@ -188,6 +169,19 @@ void MainWindow::buildMenuBar() {
     connect(actBtns, &QAction::triggered, this, &MainWindow::manageCustomButtons);
     auto *actFT   = toolsMenu->addAction(tr("Manage File Type &Actions…"));
     connect(actFT, &QAction::triggered, this, &MainWindow::manageFileTypeActions);
+
+    auto *viewMenu2 = bar->addMenu(tr("&View"));
+    if (m_jobs) {
+        auto *toggleJobs = m_jobs->toggleViewAction();
+        toggleJobs->setText(tr("&Jobs panel"));
+        viewMenu2->addAction(toggleJobs);
+    }
+
+    auto *prefsMenu = bar->addMenu(tr("&Preferences"));
+    auto *actPrefs = prefsMenu->addAction(tr("&Preferences…"));
+    actPrefs->setShortcut(QKeySequence(QKeySequence::Preferences));
+    actPrefs->setMenuRole(QAction::PreferencesRole);
+    connect(actPrefs, &QAction::triggered, this, &MainWindow::showPreferences);
 }
 
 void MainWindow::rebuildBookmarksMenu() {
@@ -370,7 +364,19 @@ void MainWindow::onFocusChanged(QWidget * /*old*/, QWidget *now) {
     }
 }
 
-/* --- File operations --- */
+/* --- File operations (async via FileJob + JobsPanel) --- */
+
+static QList<FileJob::Item> buildItems(const QStringList &srcs, const QString &dstDir) {
+    QList<FileJob::Item> out;
+    out.reserve(srcs.size());
+    for (const QString &s : srcs) {
+        FileJob::Item it;
+        it.src = s;
+        it.dst = dstDir + QLatin1Char('/') + QFileInfo(s).fileName();
+        out.append(it);
+    }
+    return out;
+}
 
 void MainWindow::doCopy(ListerWidget *src) {
     if (!src) return;
@@ -381,21 +387,9 @@ void MainWindow::doCopy(ListerWidget *src) {
         QMessageBox::information(this, tr("Copy"), tr("Nothing selected."));
         return;
     }
-    const QString dstDir = dst->currentPath();
-    int ok = 0, fail = 0, skipped = 0;
-    for (const QString &path : items) {
-        QFileInfo si(path);
-        QString target = dstDir + '/' + si.fileName();
-        if (QFileInfo::exists(target)) { ++skipped; continue; }
-        if (copyRecursive(path, target)) ++ok;
-        else ++fail;
-    }
-    dst->refresh();
-    if (fail || skipped) {
-        QMessageBox::warning(this, tr("Copy"),
-            tr("%1 copied, %2 skipped (already exists), %3 failed")
-              .arg(ok).arg(skipped).arg(fail));
-    }
+    const QString label = tr("Copy %n item(s) → %1", "", items.size())
+                              .arg(dst->currentPath());
+    m_jobs->takeJob(new FileJob(FileJob::Copy, buildItems(items, dst->currentPath()), label));
 }
 
 void MainWindow::doMove(ListerWidget *src) {
@@ -407,22 +401,9 @@ void MainWindow::doMove(ListerWidget *src) {
         QMessageBox::information(this, tr("Move"), tr("Nothing selected."));
         return;
     }
-    const QString dstDir = dst->currentPath();
-    int ok = 0, fail = 0, skipped = 0;
-    for (const QString &path : items) {
-        QFileInfo si(path);
-        QString target = dstDir + '/' + si.fileName();
-        if (QFileInfo::exists(target)) { ++skipped; continue; }
-        if (moveItem(path, target)) ++ok;
-        else ++fail;
-    }
-    src->refresh();
-    dst->refresh();
-    if (fail || skipped) {
-        QMessageBox::warning(this, tr("Move"),
-            tr("%1 moved, %2 skipped (already exists), %3 failed")
-              .arg(ok).arg(skipped).arg(fail));
-    }
+    const QString label = tr("Move %n item(s) → %1", "", items.size())
+                              .arg(dst->currentPath());
+    m_jobs->takeJob(new FileJob(FileJob::Move, buildItems(items, dst->currentPath()), label));
 }
 
 void MainWindow::doDelete(ListerWidget *src) {
@@ -432,20 +413,40 @@ void MainWindow::doDelete(ListerWidget *src) {
         QMessageBox::information(this, tr("Delete"), tr("Nothing selected."));
         return;
     }
-    auto ret = QMessageBox::question(this, tr("Delete"),
-        tr("Move %n item(s) to Trash?", "", items.size()),
-        QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes);
-    if (ret != QMessageBox::Yes) return;
-    int ok = 0, fail = 0;
+    const bool permanent = PreferencesDialog::permanentDelete();
+    if (PreferencesDialog::confirmDelete()) {
+        auto ret = QMessageBox::question(this, tr("Delete"),
+            permanent
+                ? tr("Permanently delete %n item(s)? This cannot be undone.", "", items.size())
+                : tr("Move %n item(s) to Trash?", "", items.size()),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (ret != QMessageBox::Yes) return;
+    }
+
+    if (!permanent) {
+        /* Fast path: let Qt/the OS move things to Trash synchronously. */
+        int ok = 0, fail = 0;
+        for (const QString &p : items) {
+            if (QFile::moveToTrash(p)) ++ok; else ++fail;
+        }
+        src->refresh();
+        if (fail) {
+            QMessageBox::warning(this, tr("Delete"),
+                tr("%1 moved to Trash, %2 failed").arg(ok).arg(fail));
+        }
+        return;
+    }
+
+    /* Permanent delete: queue a FileJob so it's cancellable + reported. */
+    QList<FileJob::Item> toDelete;
+    toDelete.reserve(items.size());
     for (const QString &p : items) {
-        if (QFile::moveToTrash(p)) ++ok;
-        else ++fail;
+        FileJob::Item it;
+        it.dst = p;
+        toDelete.append(it);
     }
-    src->refresh();
-    if (fail) {
-        QMessageBox::warning(this, tr("Delete"),
-            tr("%1 moved to Trash, %2 failed").arg(ok).arg(fail));
-    }
+    const QString label = tr("Delete %n item(s)", "", items.size());
+    m_jobs->takeJob(new FileJob(FileJob::Delete, toDelete, label));
 }
 
 void MainWindow::doRename(ListerWidget *src) {
@@ -832,33 +833,41 @@ void MainWindow::onDrop(ListerWidget *dest, const QList<QUrl> &urls,
                         Qt::DropAction action) {
     if (!dest || urls.isEmpty()) return;
     const QString destDir = dest->currentPath();
-    const QDir destQDir(destDir);
 
-    int ok = 0, fail = 0, skipped = 0;
+    QStringList sources;
+    sources.reserve(urls.size());
     for (const QUrl &u : urls) {
-        if (!u.isLocalFile()) { ++skipped; continue; }
+        if (!u.isLocalFile()) continue;
         const QString src = u.toLocalFile();
-        QFileInfo si(src);
-        if (!si.exists()) { ++skipped; continue; }
-        if (QFileInfo(si.absolutePath()) == QFileInfo(destDir)) {
-            /* same-dir drop: nothing to do */
-            ++skipped;
+        if (!QFileInfo::exists(src)) continue;
+        /* Don't queue same-directory drops. */
+        if (QFileInfo(src).absolutePath() == QFileInfo(destDir).absoluteFilePath())
             continue;
-        }
-        const QString target = destQDir.filePath(si.fileName());
-        if (QFileInfo::exists(target)) { ++skipped; continue; }
-        const bool success = (action == Qt::MoveAction)
-                                ? moveItem(src, target)
-                                : copyRecursive(src, target);
-        if (success) ++ok; else ++fail;
+        sources.append(src);
     }
-    if (m_left)  m_left->refresh();
-    if (m_right) m_right->refresh();
-    if (fail || skipped) {
-        QMessageBox::warning(this, tr("Drop"),
-            tr("%1 %2, %3 skipped, %4 failed")
-              .arg(ok)
-              .arg(action == Qt::MoveAction ? tr("moved") : tr("copied"))
-              .arg(skipped).arg(fail));
-    }
+    if (sources.isEmpty()) return;
+
+    const bool isMove = (action == Qt::MoveAction);
+    const QString label = isMove
+        ? tr("Drop: move %n item(s) → %1", "", sources.size()).arg(destDir)
+        : tr("Drop: copy %n item(s) → %1", "", sources.size()).arg(destDir);
+    m_jobs->takeJob(new FileJob(isMove ? FileJob::Move : FileJob::Copy,
+                                 buildItems(sources, destDir), label));
+}
+
+/* --- Preferences --- */
+
+void MainWindow::showPreferences() {
+    PreferencesDialog dlg(this);
+    connect(&dlg, &PreferencesDialog::settingsChanged,
+            this, &MainWindow::applyPreferences);
+    dlg.exec();
+}
+
+void MainWindow::applyPreferences() {
+    const bool showBank = PreferencesDialog::showButtonBank();
+    if (m_bank) m_bank->setVisible(showBank);
+    const bool hideDot = PreferencesDialog::hideDotfilesDefault();
+    if (m_left)  m_left->setHideDotfiles(hideDot);
+    if (m_right) m_right->setHideDotfiles(hideDot);
 }

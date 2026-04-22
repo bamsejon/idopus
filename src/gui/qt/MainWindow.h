@@ -9,6 +9,7 @@
 class ListerWidget;
 class ButtonBank;
 class FileTypeActions;
+class JobsPanel;
 class QMenu;
 
 class MainWindow : public QMainWindow {
@@ -32,6 +33,8 @@ private slots:
     void manageCustomButtons();
     void manageFileTypeActions();
     void runCustomCommand(const QString &command);
+    void showPreferences();
+    void applyPreferences();
 
 private:
     void setActive(ListerWidget *lister);
@@ -48,6 +51,7 @@ private:
     ListerWidget    *m_active   = nullptr;
     ButtonBank      *m_bank     = nullptr;
     FileTypeActions *m_ftypes   = nullptr;
+    JobsPanel       *m_jobs     = nullptr;
     QMenu           *m_bookmarksMenu = nullptr;
 
     /* Bookmark entries as (title, path) pairs. Empty title → show the path. */
