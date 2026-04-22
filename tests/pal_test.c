@@ -9,7 +9,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+#ifndef _WIN32
 #include <unistd.h>
+#endif
 
 #include "pal/pal_memory.h"
 #include "pal/pal_lists.h"
@@ -121,15 +123,30 @@ static void test_strings(void)
 }
 
 /* --- File tests --- */
+
+/* Pick platform-appropriate sentinel paths so this test runs unmodified on
+ * POSIX and Windows. */
+#ifdef _WIN32
+# define TEST_EXIST_PATH     "C:\\Windows\\System32\\cmd.exe"
+# define TEST_DIR_PATH       "C:\\Windows"
+# define TEST_SCAN_PATH      "C:\\Windows"
+# define TEST_TMP_FILE_PATH  "C:\\Windows\\Temp\\idopus_test.tmp"
+#else
+# define TEST_EXIST_PATH     "/usr/bin/true"
+# define TEST_DIR_PATH       "/tmp"
+# define TEST_SCAN_PATH      "/tmp"
+# define TEST_TMP_FILE_PATH  "/tmp/idopus_test.tmp"
+#endif
+
 static void test_files(void)
 {
     printf("\n--- Files ---\n");
 
     TEST(file_exists);
-    if (pal_file_exists("/usr/bin/true")) PASS(); else FAIL("/usr/bin/true not found");
+    if (pal_file_exists(TEST_EXIST_PATH)) PASS(); else FAIL(TEST_EXIST_PATH " not found");
 
     TEST(is_dir);
-    if (pal_file_is_dir("/tmp")) PASS(); else FAIL("/tmp not a dir");
+    if (pal_file_is_dir(TEST_DIR_PATH)) PASS(); else FAIL(TEST_DIR_PATH " not a dir");
 
     TEST(path_filename);
     const char *fn = pal_path_filename("/foo/bar/baz.txt");
@@ -149,14 +166,14 @@ static void test_files(void)
     if (pal_path_match("*.mod", "banana.mod")) PASS(); else FAIL("pattern");
 
     TEST(dir_scan);
-    pal_dir_t *dir = pal_dir_open("/tmp");
+    pal_dir_t *dir = pal_dir_open(TEST_SCAN_PATH);
     if (dir) {
         pal_fileinfo_t info;
         int count = 0;
         while (pal_dir_next(dir, &info) && count < 100) count++;
         pal_dir_close(dir);
-        if (count > 0) PASS(); else FAIL("no entries in /tmp");
-    } else FAIL("can't open /tmp");
+        if (count > 0) PASS(); else FAIL("no entries in " TEST_SCAN_PATH);
+    } else FAIL("can't open " TEST_SCAN_PATH);
 
     TEST(volumes);
     pal_volume_t vols[16];
@@ -169,15 +186,15 @@ static void test_files(void)
     } else FAIL("no volumes");
 
     TEST(file_io);
-    pal_file_t *f = pal_file_open("/tmp/idopus_test.tmp", "w");
+    pal_file_t *f = pal_file_open(TEST_TMP_FILE_PATH, "w");
     if (f) {
         pal_file_write(f, "iDOpus", 6);
         pal_file_close(f);
-        f = pal_file_open("/tmp/idopus_test.tmp", "r");
+        f = pal_file_open(TEST_TMP_FILE_PATH, "r");
         char buf[16] = {0};
         pal_file_read(f, buf, 6);
         pal_file_close(f);
-        pal_file_delete("/tmp/idopus_test.tmp");
+        pal_file_delete(TEST_TMP_FILE_PATH);
         if (strcmp(buf, "iDOpus") == 0) PASS(); else FAIL(buf);
     } else FAIL("can't create temp file");
 }
