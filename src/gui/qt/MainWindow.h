@@ -10,6 +10,7 @@ class ListerWidget;
 class ButtonBank;
 class FileTypeActions;
 class JobsPanel;
+class PreviewPane;
 class QMenu;
 
 class MainWindow : public QMainWindow {
@@ -52,6 +53,7 @@ private:
     ButtonBank      *m_bank     = nullptr;
     FileTypeActions *m_ftypes   = nullptr;
     JobsPanel       *m_jobs     = nullptr;
+    PreviewPane     *m_preview  = nullptr;
     QMenu           *m_bookmarksMenu = nullptr;
 
     /* Bookmark entries as (title, path) pairs. Empty title → show the path. */

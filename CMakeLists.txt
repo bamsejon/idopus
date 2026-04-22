@@ -146,6 +146,10 @@ if(NOT APPLE)
                 src/gui/qt/ConflictDialog.h
                 src/gui/qt/PreferencesDialog.cpp
                 src/gui/qt/PreferencesDialog.h
+                src/gui/qt/BreadcrumbBar.cpp
+                src/gui/qt/BreadcrumbBar.h
+                src/gui/qt/PreviewPane.cpp
+                src/gui/qt/PreviewPane.h
             )
             if(WIN32)
                 set(IDOPUS_QT_WIN32 ON)
