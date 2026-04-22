@@ -136,6 +136,8 @@ if(NOT APPLE)
                 src/gui/qt/DirBufferModel.h
                 src/gui/qt/ButtonBank.cpp
                 src/gui/qt/ButtonBank.h
+                src/gui/qt/FileTypeActions.cpp
+                src/gui/qt/FileTypeActions.h
             )
             if(WIN32)
                 set(IDOPUS_QT_WIN32 ON)

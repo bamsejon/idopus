@@ -8,6 +8,7 @@
 
 class ListerWidget;
 class ButtonBank;
+class FileTypeActions;
 class QMenu;
 
 class MainWindow : public QMainWindow {
@@ -28,6 +29,9 @@ private slots:
     void onDrop(ListerWidget *dest, const QList<QUrl> &urls, Qt::DropAction action);
     void addBookmarkForActive();
     void manageBookmarks();
+    void manageCustomButtons();
+    void manageFileTypeActions();
+    void runCustomCommand(const QString &command);
 
 private:
     void setActive(ListerWidget *lister);
@@ -39,11 +43,12 @@ private:
     void loadBookmarks();
     void saveBookmarks();
 
-    ListerWidget *m_left   = nullptr;
-    ListerWidget *m_right  = nullptr;
-    ListerWidget *m_active = nullptr;
-    ButtonBank   *m_bank   = nullptr;
-    QMenu        *m_bookmarksMenu = nullptr;
+    ListerWidget    *m_left     = nullptr;
+    ListerWidget    *m_right    = nullptr;
+    ListerWidget    *m_active   = nullptr;
+    ButtonBank      *m_bank     = nullptr;
+    FileTypeActions *m_ftypes   = nullptr;
+    QMenu           *m_bookmarksMenu = nullptr;
 
     /* Bookmark entries as (title, path) pairs. Empty title → show the path. */
     QList<QPair<QString, QString>> m_bookmarks;
