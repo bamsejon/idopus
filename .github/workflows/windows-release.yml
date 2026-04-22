@@ -1,0 +1,104 @@
+name: Windows installer
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version string (defaults to tag or 0.0.0-dev)"
+        required: false
+        default: ""
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute version
+        id: ver
+        shell: pwsh
+        run: |
+          if ("${{ github.ref_type }}" -eq "tag") {
+            $v = "${{ github.ref_name }}" -replace "^v",""
+          } elseif ("${{ inputs.version }}" -ne "") {
+            $v = "${{ inputs.version }}" -replace "^v",""
+          } else {
+            $v = "0.0.0-dev.$(Get-Date -Format 'yyyyMMddHHmmss')"
+          }
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "Building iDOpus $v"
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.8.3"
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          modules: ""
+          cache: true
+
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_PREFIX_PATH="${env:Qt6_DIR}"
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build build --config Release --parallel
+
+      - name: Test (core + pal)
+        shell: pwsh
+        run: |
+          & .\build\Release\pal_test.exe
+          if ($LASTEXITCODE -ne 0) { throw "pal_test failed" }
+          & .\build\Release\core_test.exe
+          if ($LASTEXITCODE -ne 0) { throw "core_test failed" }
+
+      - name: Stage Qt runtime next to binary
+        shell: pwsh
+        run: |
+          & "${env:Qt6_DIR}\bin\windeployqt.exe" `
+              --release --no-translations --no-system-d3d-compiler --no-opengl-sw `
+              .\build\Release\idopus-qt.exe
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" `
+            "/DIdopusVersion=$v" `
+            "/DIdopusSourceDir=$(Resolve-Path .\build\Release)" `
+            packaging\windows\idopus.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+          Get-ChildItem packaging\windows\build-installer
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: iDOpus-windows-${{ steps.ver.outputs.version }}
+          path: packaging/windows/build-installer/*.exe
+          if-no-files-found: error
+
+      - name: Attach to GitHub Release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: packaging/windows/build-installer/*.exe
+          fail_on_unmatched_files: true

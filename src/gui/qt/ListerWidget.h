@@ -13,6 +13,8 @@ class QLabel;
 class QModelIndex;
 class QEvent;
 class QObject;
+class QFileSystemWatcher;
+class QTimer;
 class DirBufferModel;
 
 class ListerWidget : public QWidget {
@@ -28,7 +30,11 @@ public slots:
     void goParent();
     void goHome();
     void goRoot();
+    void goBack();
+    void goForward();
     void refresh();
+    bool canGoBack() const    { return m_historyIndex > 0; }
+    bool canGoForward() const { return m_historyIndex + 1 < m_history.size(); }
     void selectAll();
     void selectNone();
     void selectByPattern(const QString &pattern);
@@ -39,6 +45,7 @@ public slots:
 
 signals:
     void pathChanged(const QString &newPath);
+    void historyChanged();  /* emitted when back/forward availability might have changed */
     void copyRequested(ListerWidget *source);
     void moveRequested(ListerWidget *source);
     void deleteRequested(ListerWidget *source);
@@ -58,13 +65,20 @@ private slots:
     void onHeaderClicked(int section);
     void onContextMenu(const QPoint &pos);
     void updateStatus();
+    void onWatchedDirChanged(const QString &path);
+    void fireDebouncedRefresh();
 
 private:
     QPushButton *makeButton(const QString &text, bool enabled);
+    void setPathInternal(const QString &path, bool recordHistory);
+    void updateNavButtons();
+    void rewatch(const QString &path);
 
     QTreeView      *m_view       = nullptr;
     DirBufferModel *m_model      = nullptr;
     QLineEdit      *m_pathField  = nullptr;
+    QPushButton    *m_backBtn    = nullptr;
+    QPushButton    *m_fwdBtn     = nullptr;
     QPushButton    *m_parentBtn  = nullptr;
     QPushButton    *m_refreshBtn = nullptr;
     QPushButton    *m_parent2Btn = nullptr;
@@ -80,10 +94,14 @@ private:
     QPushButton    *m_filterBtn  = nullptr;
     QLabel         *m_stateBadge  = nullptr;
     QLabel         *m_statusLabel = nullptr;
+    QFileSystemWatcher *m_watcher    = nullptr;
+    QTimer             *m_refreshTimer = nullptr;
     bool            m_active      = false;
     QString         m_path;
     QString         m_showPattern;
     bool            m_hideDotfiles = false;
+    QStringList     m_history;
+    int             m_historyIndex = -1;
 
     void reapplyFilter();
 };
