@@ -40,6 +40,7 @@ bool pal_mutex_trylock(pal_mutex_t *m)
 void pal_rwlock_init(pal_rwlock_t *rw)
 {
     InitializeSRWLock(&rw->lock);
+    rw->writer_held = 0;
 }
 
 void pal_rwlock_destroy(pal_rwlock_t *rw)
@@ -55,16 +56,25 @@ void pal_rwlock_read_lock(pal_rwlock_t *rw)
 
 void pal_rwlock_read_unlock(pal_rwlock_t *rw)
 {
-    ReleaseSRWLockShared(&rw->lock);
+    /* Compensate for callers that acquired the write lock and release via
+     * the read-unlock entry point (the POSIX implementation only has a
+     * single pthread_rwlock_unlock so this pattern exists in the codebase). */
+    if (InterlockedCompareExchange(&rw->writer_held, 0, 1) == 1) {
+        ReleaseSRWLockExclusive(&rw->lock);
+    } else {
+        ReleaseSRWLockShared(&rw->lock);
+    }
 }
 
 void pal_rwlock_write_lock(pal_rwlock_t *rw)
 {
     AcquireSRWLockExclusive(&rw->lock);
+    rw->writer_held = 1;
 }
 
 void pal_rwlock_write_unlock(pal_rwlock_t *rw)
 {
+    rw->writer_held = 0;
     ReleaseSRWLockExclusive(&rw->lock);
 }
 

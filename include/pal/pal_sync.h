@@ -45,6 +45,10 @@ bool pal_mutex_trylock(pal_mutex_t *m);
 typedef struct {
 #ifdef _WIN32
     SRWLOCK lock;
+    /* SRWLOCK needs separate shared/exclusive release; track last-acquired
+     * mode so the single pal_rwlock_*_unlock surface stays mode-agnostic
+     * (matches pthread_rwlock_unlock semantics). */
+    volatile LONG writer_held;
 #else
     pthread_rwlock_t rwlock;
 #endif
