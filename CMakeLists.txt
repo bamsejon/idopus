@@ -138,6 +138,14 @@ if(NOT APPLE)
                 src/gui/qt/ButtonBank.h
                 src/gui/qt/FileTypeActions.cpp
                 src/gui/qt/FileTypeActions.h
+                src/gui/qt/FileJob.cpp
+                src/gui/qt/FileJob.h
+                src/gui/qt/JobsPanel.cpp
+                src/gui/qt/JobsPanel.h
+                src/gui/qt/ConflictDialog.cpp
+                src/gui/qt/ConflictDialog.h
+                src/gui/qt/PreferencesDialog.cpp
+                src/gui/qt/PreferencesDialog.h
             )
             if(WIN32)
                 set(IDOPUS_QT_WIN32 ON)
