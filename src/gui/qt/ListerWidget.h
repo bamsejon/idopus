@@ -15,6 +15,7 @@ class QEvent;
 class QObject;
 class QFileSystemWatcher;
 class QTimer;
+class BreadcrumbBar;
 class DirBufferModel;
 class FileTypeActions;
 
@@ -53,6 +54,7 @@ public slots:
 signals:
     void pathChanged(const QString &newPath);
     void historyChanged();  /* emitted when back/forward availability might have changed */
+    void currentFileChanged(const QString &path);  /* for preview pane */
     void copyRequested(ListerWidget *source);
     void moveRequested(ListerWidget *source);
     void deleteRequested(ListerWidget *source);
@@ -74,12 +76,18 @@ private slots:
     void updateStatus();
     void onWatchedDirChanged(const QString &path);
     void fireDebouncedRefresh();
+    void clearTypeToFindBuffer();
+    void onCurrentRowChanged();
+
+protected:
+    void keyPressEvent(QKeyEvent *event) override;
 
 private:
     QPushButton *makeButton(const QString &text, bool enabled);
     void setPathInternal(const QString &path, bool recordHistory);
     void updateNavButtons();
     void rewatch(const QString &path);
+    void jumpToPrefix(const QString &prefix);
 
     QTreeView      *m_view       = nullptr;
     DirBufferModel *m_model      = nullptr;
@@ -104,6 +112,11 @@ private:
     QFileSystemWatcher *m_watcher       = nullptr;
     QTimer             *m_refreshTimer  = nullptr;
     FileTypeActions    *m_fileTypeActions = nullptr;
+    BreadcrumbBar      *m_breadcrumb    = nullptr;
+
+    /* type-to-find state */
+    QString             m_typeBuffer;
+    QTimer             *m_typeTimer     = nullptr;
     bool            m_active      = false;
     QString         m_path;
     QString         m_showPattern;

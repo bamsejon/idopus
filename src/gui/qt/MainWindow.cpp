@@ -5,6 +5,7 @@
 #include "FileJob.h"
 #include "JobsPanel.h"
 #include "PreferencesDialog.h"
+#include "PreviewPane.h"
 
 #include <QAction>
 #include <QApplication>
@@ -46,6 +47,20 @@ MainWindow::MainWindow(const QString &leftPath, const QString &rightPath,
     m_jobs   = new JobsPanel(this);
     addDockWidget(Qt::BottomDockWidgetArea, m_jobs);
     m_jobs->hide();   /* appears automatically when a job is queued */
+
+    m_preview = new PreviewPane(this);
+    addDockWidget(Qt::RightDockWidgetArea, m_preview);
+    m_preview->hide();   /* opt-in via View menu or the active lister's selection */
+
+    /* Show the current selection of whichever lister is active in the
+     * preview pane. The pane keeps its last content until a new selection
+     * arrives, so switching panes doesn't make it flicker empty. */
+    auto wireSelectionToPreview = [this](ListerWidget *l) {
+        connect(l, &ListerWidget::currentFileChanged,
+                m_preview, &PreviewPane::showPath);
+    };
+    wireSelectionToPreview(m_left);
+    wireSelectionToPreview(m_right);
 
     connect(m_jobs, &JobsPanel::jobFinished, this, [this](FileJob *) {
         if (m_left)  m_left->refresh();
@@ -175,6 +190,12 @@ void MainWindow::buildMenuBar() {
         auto *toggleJobs = m_jobs->toggleViewAction();
         toggleJobs->setText(tr("&Jobs panel"));
         viewMenu2->addAction(toggleJobs);
+    }
+    if (m_preview) {
+        auto *togglePrev = m_preview->toggleViewAction();
+        togglePrev->setText(tr("&Preview pane"));
+        togglePrev->setShortcut(QKeySequence(Qt::Key_Space));
+        viewMenu2->addAction(togglePrev);
     }
 
     auto *prefsMenu = bar->addMenu(tr("&Preferences"));

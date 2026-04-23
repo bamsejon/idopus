@@ -1,6 +1,9 @@
 #include "ListerWidget.h"
+#include "BreadcrumbBar.h"
 #include "DirBufferModel.h"
 #include "FileTypeActions.h"
+
+#include <QKeyEvent>
 
 #include <QTreeView>
 #include <QLineEdit>
@@ -85,6 +88,11 @@ ListerWidget::ListerWidget(const QString &initialPath, QWidget *parent)
     pathRow->addWidget(m_refreshBtn);
     pathRow->addWidget(m_pathField, 1);
 
+    /* Clickable breadcrumb row above the text path field. */
+    m_breadcrumb = new BreadcrumbBar(this);
+    connect(m_breadcrumb, &BreadcrumbBar::pathPicked,
+            this, &ListerWidget::setPath);
+
     /* --- Action row: Copy · Move · Delete · Rename · MakeDir · Info · Filter
                        | Parent · Root | All · None --- */
     m_copyBtn    = makeButton(QStringLiteral("Copy"),    true);
@@ -153,10 +161,11 @@ ListerWidget::ListerWidget(const QString &initialPath, QWidget *parent)
     statusRow->addWidget(m_stateBadge);
     statusRow->addWidget(m_statusLabel, 1);
 
-    /* --- Main layout: pathRow / actionRow / tree / statusRow --- */
+    /* --- Main layout: breadcrumb / pathRow / actionRow / tree / statusRow --- */
     auto *main = new QVBoxLayout(this);
     main->setContentsMargins(2, 2, 2, 2);
     main->setSpacing(4);
+    main->addWidget(m_breadcrumb);
     main->addLayout(pathRow);
     main->addLayout(actionRow);
     main->addWidget(m_view, 1);
@@ -196,6 +205,16 @@ ListerWidget::ListerWidget(const QString &initialPath, QWidget *parent)
     m_refreshTimer->setInterval(250);
     connect(m_refreshTimer, &QTimer::timeout,
             this,           &ListerWidget::fireDebouncedRefresh);
+
+    /* Type-to-find — accumulate letters, jump on each change, clear after 700 ms. */
+    m_typeTimer = new QTimer(this);
+    m_typeTimer->setSingleShot(true);
+    m_typeTimer->setInterval(700);
+    connect(m_typeTimer, &QTimer::timeout,
+            this, &ListerWidget::clearTypeToFindBuffer);
+
+    connect(m_view->selectionModel(), &QItemSelectionModel::currentRowChanged,
+            this, [this](const QModelIndex&, const QModelIndex&) { onCurrentRowChanged(); });
 
     setActive(false);
     setPath(initialPath);
@@ -252,7 +271,8 @@ void ListerWidget::setPathInternal(const QString &path, bool recordHistory) {
     }
     m_path = path;
     m_model->setPath(path);
-    if (m_pathField) m_pathField->setText(path);
+    if (m_pathField)  m_pathField->setText(path);
+    if (m_breadcrumb) m_breadcrumb->setPath(path);
     m_view->resizeColumnToContents(DirBufferModel::ColName);
     m_view->resizeColumnToContents(DirBufferModel::ColSize);
     rewatch(path);
@@ -260,6 +280,8 @@ void ListerWidget::setPathInternal(const QString &path, bool recordHistory) {
     emit pathChanged(m_path);
     emit historyChanged();
     updateStatus();
+    /* New directory usually means no selection — clear the preview. */
+    emit currentFileChanged(QString());
 }
 
 void ListerWidget::goParent() {
@@ -617,4 +639,89 @@ bool ListerWidget::eventFilter(QObject *obj, QEvent *event) {
         break;
     }
     return QWidget::eventFilter(obj, event);
+}
+
+/* --- Type-to-find --- */
+
+void ListerWidget::keyPressEvent(QKeyEvent *event) {
+    /* Only react when the tree view (or its children) holds the focus.
+     * We don't want typing to hijack the path field / other widgets. */
+    QWidget *fw = focusWidget();
+    bool treeFocused = false;
+    for (QWidget *w = fw; w; w = w->parentWidget()) {
+        if (w == m_view) { treeFocused = true; break; }
+    }
+    if (!treeFocused) { QWidget::keyPressEvent(event); return; }
+
+    /* Backspace trims the buffer. */
+    if (event->key() == Qt::Key_Backspace) {
+        if (!m_typeBuffer.isEmpty()) {
+            m_typeBuffer.chop(1);
+            if (!m_typeBuffer.isEmpty()) jumpToPrefix(m_typeBuffer);
+            m_typeTimer->start();
+        }
+        event->accept();
+        return;
+    }
+
+    if (event->key() == Qt::Key_Escape) {
+        clearTypeToFindBuffer();
+        event->accept();
+        return;
+    }
+
+    const QString text = event->text();
+    if (text.isEmpty() || !text.at(0).isPrint()) {
+        QWidget::keyPressEvent(event);
+        return;
+    }
+    /* Printable character — grow buffer, match. */
+    m_typeBuffer += text;
+    jumpToPrefix(m_typeBuffer);
+    m_typeTimer->start();
+    if (m_statusLabel) {
+        m_statusLabel->setText(tr("Find: %1").arg(m_typeBuffer));
+    }
+    event->accept();
+}
+
+void ListerWidget::clearTypeToFindBuffer() {
+    m_typeBuffer.clear();
+    updateStatus();
+}
+
+void ListerWidget::jumpToPrefix(const QString &prefix) {
+    if (!m_model || !m_view) return;
+    const int rows = m_model->rowCount();
+    if (rows == 0) return;
+    /* Start from the row after the current one so repeated typing of the
+     * same prefix cycles through matches. */
+    int start = m_view->currentIndex().row();
+    if (start < 0) start = -1;
+
+    auto matches = [](const QString &name, const QString &pfx) {
+        return name.startsWith(pfx, Qt::CaseInsensitive);
+    };
+
+    for (int step = 1; step <= rows; ++step) {
+        int r = (start + step) % rows;
+        const dir_entry_t *e = m_model->entryAt(r);
+        if (!e) continue;
+        if (matches(QString::fromUtf8(e->name), prefix)) {
+            QModelIndex idx = m_model->index(r, 0);
+            m_view->setCurrentIndex(idx);
+            m_view->scrollTo(idx, QAbstractItemView::PositionAtCenter);
+            return;
+        }
+    }
+}
+
+void ListerWidget::onCurrentRowChanged() {
+    const QModelIndex idx = m_view->currentIndex();
+    if (!idx.isValid()) { emit currentFileChanged(QString()); return; }
+    const dir_entry_t *e = m_model->entryAt(idx.row());
+    if (!e) { emit currentFileChanged(QString()); return; }
+    char full[4096];
+    pal_path_join(m_path.toUtf8().constData(), e->name, full, sizeof full);
+    emit currentFileChanged(QString::fromUtf8(full));
 }
