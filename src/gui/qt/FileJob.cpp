@@ -1,10 +1,12 @@
 #include "FileJob.h"
+#include "Archiver.h"
 
 #include <QDir>
 #include <QDirIterator>
 #include <QFile>
 #include <QFileInfo>
 #include <QMutexLocker>
+#include <QProcess>
 #include <QThread>
 
 FileJob::FileJob(Op op, QList<Item> items, QString label, QObject *parent)
@@ -250,11 +252,118 @@ bool FileJob::processItem(const Op op, const Item &item, qint64 batchTotal) {
     return false;
 }
 
+bool FileJob::runExternalProcess(const QString &program, const QStringList &args,
+                                  const QString &workingDir) {
+    QProcess proc;
+    proc.setProcessChannelMode(QProcess::MergedChannels);
+    if (!workingDir.isEmpty()) proc.setWorkingDirectory(workingDir);
+    proc.start(program, args);
+    if (!proc.waitForStarted(5000)) {
+        emit logMessage(tr("Could not start %1: %2").arg(program, proc.errorString()));
+        return false;
+    }
+    /* Poll for output / cancel. We don't have per-file progress from
+     * zip/tar/etc, so we report indeterminate progress by keeping
+     * itemsTotal = 1 and itemsDone = 0 until the process exits. */
+    while (proc.state() != QProcess::NotRunning) {
+        if (cancelled()) {
+            proc.terminate();
+            if (!proc.waitForFinished(2000)) proc.kill();
+            return false;
+        }
+        if (proc.waitForReadyRead(250)) {
+            const QString chunk = QString::fromLocal8Bit(proc.readAll());
+            for (const QString &line : chunk.split(QChar(u'\n'), Qt::SkipEmptyParts)) {
+                QString trimmed = line.trimmed();
+                if (!trimmed.isEmpty()) emit logMessage(trimmed);
+            }
+        }
+        /* Nudge the UI every ~250 ms so the progress bar doesn't look dead. */
+        emit progress(m_bytesDone, m_bytesDone ? m_bytesDone : 1, 0, 1, m_archivePath);
+    }
+    const int code = proc.exitCode();
+    const auto status = proc.exitStatus();
+    if (status != QProcess::NormalExit || code != 0) {
+        emit logMessage(tr("%1 failed (exit %2)").arg(program).arg(code));
+        return false;
+    }
+    return true;
+}
+
 void FileJob::run() {
     m_running.storeRelease(1);
     m_bytesDone = 0;
     m_okCount = m_skippedCount = m_failedCount = 0;
     m_itemIndex = 0;
+
+    if (m_op == Compress) {
+        QStringList sources;
+        sources.reserve(m_items.size());
+        for (const Item &it : m_items)
+            if (!it.src.isEmpty()) sources << it.src;
+
+        QString program;
+        QStringList args;
+        bool ok = Archiver::buildCompressArgv(m_archivePath, sources, m_archiveWD,
+                                               program, args);
+        if (!ok) {
+            emit logMessage(tr("No archiver available for %1").arg(m_archivePath));
+            m_failedCount = 1;
+        } else {
+            emit progress(0, 1, 0, 1, m_archivePath);
+            if (runExternalProcess(program, args, m_archiveWD)) {
+                m_okCount = sources.size();
+            } else {
+                m_failedCount = 1;
+                QFile::remove(m_archivePath);
+            }
+        }
+
+        const QString summary = cancelled()
+            ? tr("Cancelled")
+            : (m_failedCount == 0
+                   ? tr("Created %1").arg(QFileInfo(m_archivePath).fileName())
+                   : tr("Compress failed"));
+        m_running.storeRelease(0);
+        m_finished.storeRelease(1);
+        emit progress(1, 1, 1, 1, QString());
+        emit finished(m_failedCount == 0 && !cancelled(),
+                      m_okCount, m_skippedCount, m_failedCount, summary);
+        return;
+    }
+
+    if (m_op == Extract) {
+        if (!QDir().mkpath(m_archiveWD)) {
+            emit logMessage(tr("Could not create destination %1").arg(m_archiveWD));
+            m_failedCount = 1;
+        } else {
+            QString program;
+            QStringList args;
+            bool ok = Archiver::buildExtractArgv(m_archivePath, m_archiveWD,
+                                                  program, args);
+            if (!ok) {
+                emit logMessage(tr("No extractor available for %1").arg(m_archivePath));
+                m_failedCount = 1;
+            } else {
+                emit progress(0, 1, 0, 1, m_archivePath);
+                if (runExternalProcess(program, args, m_archiveWD))
+                    m_okCount = 1;
+                else
+                    m_failedCount = 1;
+            }
+        }
+        const QString summary = cancelled()
+            ? tr("Cancelled")
+            : (m_failedCount == 0
+                   ? tr("Extracted into %1").arg(QFileInfo(m_archiveWD).fileName())
+                   : tr("Extract failed"));
+        m_running.storeRelease(0);
+        m_finished.storeRelease(1);
+        emit progress(1, 1, 1, 1, QString());
+        emit finished(m_failedCount == 0 && !cancelled(),
+                      m_okCount, m_skippedCount, m_failedCount, summary);
+        return;
+    }
 
     /* Pre-compute total bytes for a meaningful progress percentage. */
     qint64 batchTotal = 0;
