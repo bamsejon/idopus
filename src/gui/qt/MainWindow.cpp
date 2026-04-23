@@ -2,6 +2,7 @@
 #include "ListerWidget.h"
 #include "ButtonBank.h"
 #include "FileTypeActions.h"
+#include "Archiver.h"
 #include "FileJob.h"
 #include "JobsPanel.h"
 #include "PreferencesDialog.h"
@@ -11,6 +12,7 @@
 #include <QApplication>
 #include <QBoxLayout>
 #include <QCheckBox>
+#include <QComboBox>
 #include <QDateTime>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -178,6 +180,17 @@ void MainWindow::buildMenuBar() {
     actFilter->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+F")));
     connect(actFilter, &QAction::triggered, this,
             [this]{ if (m_active) doFilter(m_active); });
+
+    toolsMenu->addSeparator();
+    auto *actCompress = toolsMenu->addAction(tr("&Compress Selection…"));
+    actCompress->setShortcut(QKeySequence(QStringLiteral("Ctrl+Alt+C")));
+    connect(actCompress, &QAction::triggered, this,
+            [this]{ if (m_active) doCompress(m_active); });
+
+    auto *actExtract = toolsMenu->addAction(tr("&Extract Selection…"));
+    actExtract->setShortcut(QKeySequence(QStringLiteral("Ctrl+Alt+E")));
+    connect(actExtract, &QAction::triggered, this,
+            [this]{ if (m_active) doExtract(m_active); });
 
     toolsMenu->addSeparator();
     auto *actBtns = toolsMenu->addAction(tr("Manage Custom &Buttons…"));
@@ -874,6 +887,132 @@ void MainWindow::onDrop(ListerWidget *dest, const QList<QUrl> &urls,
         : tr("Drop: copy %n item(s) → %1", "", sources.size()).arg(destDir);
     m_jobs->takeJob(new FileJob(isMove ? FileJob::Move : FileJob::Copy,
                                  buildItems(sources, destDir), label));
+}
+
+/* --- Compress / Extract --- */
+
+void MainWindow::doCompress(ListerWidget *src) {
+    if (!src) return;
+    const QStringList items = src->selectedPaths();
+    if (items.isEmpty()) {
+        QMessageBox::information(this, tr("Compress"), tr("Nothing selected."));
+        return;
+    }
+
+    const QStringList formats = Archiver::supportedCompressFormats();
+    if (formats.isEmpty()) {
+        QMessageBox::warning(this, tr("Compress"),
+            tr("No archive tool available on this system (install zip, tar, or 7z)."));
+        return;
+    }
+
+    QDialog dlg(this);
+    dlg.setWindowTitle(tr("Compress Selection"));
+
+    const QString firstName = QFileInfo(items.first()).completeBaseName();
+    const QString defaultBase = items.size() == 1
+        ? firstName
+        : tr("archive-%1").arg(items.size());
+
+    auto *nameEdit = new QLineEdit(defaultBase, &dlg);
+
+    auto *fmtCombo = new QComboBox(&dlg);
+    for (const QString &f : formats) fmtCombo->addItem(QStringLiteral(".") + f, f);
+
+    auto *form = new QFormLayout;
+    form->addRow(tr("Name:"),   nameEdit);
+    form->addRow(tr("Format:"), fmtCombo);
+
+    auto *buttons = new QDialogButtonBox(
+        QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dlg);
+    connect(buttons, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+
+    auto *main = new QVBoxLayout(&dlg);
+    main->addLayout(form);
+    main->addWidget(buttons);
+
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    const QString base = nameEdit->text().trimmed();
+    if (base.isEmpty()) return;
+    const QString fmt  = fmtCombo->currentData().toString();
+
+    const QString workingDir = src->currentPath();
+    QString archive = workingDir + QLatin1Char('/') + base
+                      + QLatin1Char('.') + fmt;
+
+    if (QFileInfo::exists(archive)) {
+        if (QMessageBox::question(this, tr("Compress"),
+            tr("%1 already exists. Replace?").arg(archive),
+            QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes) return;
+        QFile::remove(archive);
+    }
+
+    QList<FileJob::Item> jobItems;
+    jobItems.reserve(items.size());
+    for (const QString &p : items) {
+        FileJob::Item it;
+        it.src = p;
+        jobItems.append(it);
+    }
+    const QString label = tr("Compress %n item(s) → %1", "", items.size())
+                              .arg(QFileInfo(archive).fileName());
+    auto *job = new FileJob(FileJob::Compress, jobItems, label);
+    job->setCompressTarget(archive, workingDir);
+    m_jobs->takeJob(job);
+}
+
+void MainWindow::doExtract(ListerWidget *src) {
+    if (!src) return;
+    const QStringList items = src->selectedPaths();
+    if (items.isEmpty()) {
+        QMessageBox::information(this, tr("Extract"), tr("Nothing selected."));
+        return;
+    }
+
+    const QString workingDir = src->currentPath();
+    for (const QString &archive : items) {
+        if (!Archiver::isArchive(archive)) {
+            QMessageBox::warning(this, tr("Extract"),
+                tr("Not a recognised archive:\n%1").arg(archive));
+            continue;
+        }
+
+        /* Strip the archive extension to get a sensible output directory name. */
+        QString base = QFileInfo(archive).fileName();
+        for (const QString &suf : { QStringLiteral(".tar.gz"),
+                                     QStringLiteral(".tar.bz2"),
+                                     QStringLiteral(".tar.xz"),
+                                     QStringLiteral(".tar"),
+                                     QStringLiteral(".tgz"),
+                                     QStringLiteral(".tbz2"),
+                                     QStringLiteral(".txz"),
+                                     QStringLiteral(".zip"),
+                                     QStringLiteral(".7z") }) {
+            if (base.endsWith(suf, Qt::CaseInsensitive)) {
+                base.chop(suf.size());
+                break;
+            }
+        }
+
+        QString destDir = workingDir + QLatin1Char('/') + base;
+        /* Avoid clobbering an existing directory — pick a numeric suffix. */
+        int n = 2;
+        while (QFileInfo::exists(destDir)) {
+            destDir = workingDir + QLatin1Char('/') + base
+                      + QStringLiteral(" (") + QString::number(n++)
+                      + QLatin1Char(')');
+        }
+
+        QList<FileJob::Item> noItems;   /* unused for Extract */
+        const QString label = tr("Extract %1 → %2")
+                                  .arg(QFileInfo(archive).fileName(),
+                                       QFileInfo(destDir).fileName());
+        auto *job = new FileJob(FileJob::Extract, noItems, label);
+        job->setExtractTarget(archive, destDir);
+        m_jobs->takeJob(job);
+    }
 }
 
 /* --- Preferences --- */
