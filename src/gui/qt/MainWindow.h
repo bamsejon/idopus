@@ -36,6 +36,8 @@ private slots:
     void runCustomCommand(const QString &command);
     void showPreferences();
     void applyPreferences();
+    void doCompress(ListerWidget *src);
+    void doExtract(ListerWidget *src);
 
 private:
     void setActive(ListerWidget *lister);

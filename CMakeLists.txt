@@ -150,6 +150,8 @@ if(NOT APPLE)
                 src/gui/qt/BreadcrumbBar.h
                 src/gui/qt/PreviewPane.cpp
                 src/gui/qt/PreviewPane.h
+                src/gui/qt/Archiver.cpp
+                src/gui/qt/Archiver.h
             )
             if(WIN32)
                 set(IDOPUS_QT_WIN32 ON)

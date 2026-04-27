@@ -23,7 +23,7 @@
 class FileJob : public QObject {
     Q_OBJECT
 public:
-    enum Op { Copy, Move, Delete };
+    enum Op { Copy, Move, Delete, Compress, Extract };
     Q_ENUM(Op)
 
     enum ConflictAction {
@@ -42,6 +42,23 @@ public:
 
     /* `label` is a short human description shown in the jobs panel. */
     FileJob(Op op, QList<Item> items, QString label, QObject *parent = nullptr);
+
+    /* Configure Compress: `archivePath` is the output, `workingDir` is
+     * the directory the source items live in (used to strip absolute
+     * prefixes from the archive's internal paths). */
+    void setCompressTarget(const QString &archivePath,
+                           const QString &workingDir) {
+        m_archivePath = archivePath;
+        m_archiveWD   = workingDir;
+    }
+
+    /* Configure Extract: `archivePath` is the input, `destDir` is where
+     * the contents land. Items list is ignored for Extract. */
+    void setExtractTarget(const QString &archivePath,
+                          const QString &destDir) {
+        m_archivePath = archivePath;
+        m_archiveWD   = destDir;
+    }
 
     Op                  operation() const { return m_op; }
     const QString      &label() const     { return m_label; }
@@ -81,6 +98,8 @@ private:
     bool doCopyTree(const QString &src, const QString &dst, qint64 batchTotal);
     bool doCopyFile(const QString &src, const QString &dst, qint64 batchTotal);
     bool doDeleteTree(const QString &path);
+    bool runExternalProcess(const QString &program, const QStringList &args,
+                             const QString &workingDir);
 
     ConflictAction askConflict(const QString &src, const QString &dst, bool isDir);
     QString uniqueTarget(const QString &dst) const;
@@ -88,6 +107,8 @@ private:
     Op           m_op;
     QList<Item>  m_items;
     QString      m_label;
+    QString      m_archivePath;   /* Compress/Extract targets */
+    QString      m_archiveWD;
 
     QAtomicInt   m_running       { 0 };
     QAtomicInt   m_finished      { 0 };
