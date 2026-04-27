@@ -119,6 +119,21 @@ MainWindow::MainWindow(const QString &leftPath, const QString &rightPath,
           [this]{ if (m_active) m_active->toggleHideDotfiles(); });
     addSC(QKeySequence(QStringLiteral("Ctrl+H")),
           [this]{ if (m_active) m_active->toggleHideDotfiles(); });
+
+    /* ⌘+ / ⌘- — step preview pane size up or down */
+    auto stepPreview = [this](int delta) {
+        if (!m_preview) return;
+        m_preview->stepPreset(delta);
+        QSettings().setValue(QString::fromLatin1(PreferencesDialog::KEY_PREVIEW_SIZE),
+                             m_preview->sizePreset());
+        if (m_preview->isVisible())
+            resizeDocks({m_preview},
+                        {PreviewPane::presetWidth(m_preview->sizePreset())},
+                        Qt::Horizontal);
+    };
+    addSC(QKeySequence(QStringLiteral("Ctrl+=")), [stepPreview]{ stepPreview(+1); });
+    addSC(QKeySequence(QStringLiteral("Ctrl++")), [stepPreview]{ stepPreview(+1); });
+    addSC(QKeySequence(QStringLiteral("Ctrl+-")), [stepPreview]{ stepPreview(-1); });
     addSC(QKeySequence(QStringLiteral("Ctrl+Shift+A")), [this]{
         if (!m_active) return;
         bool ok;
@@ -891,4 +906,12 @@ void MainWindow::applyPreferences() {
     const bool hideDot = PreferencesDialog::hideDotfilesDefault();
     if (m_left)  m_left->setHideDotfiles(hideDot);
     if (m_right) m_right->setHideDotfiles(hideDot);
+    if (m_preview) {
+        const int preset = PreferencesDialog::previewSize();
+        m_preview->setSizePreset(preset);
+        if (m_preview->isVisible())
+            resizeDocks({m_preview},
+                        {PreviewPane::presetWidth(preset)},
+                        Qt::Horizontal);
+    }
 }

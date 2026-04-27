@@ -1,16 +1,31 @@
 #include "PreviewPane.h"
 
+#include <QApplication>
+#include <QCursor>
 #include <QDateTime>
+#include <QEvent>
 #include <QFile>
 #include <QFileInfo>
+#include <QGuiApplication>
 #include <QImageReader>
 #include <QLabel>
 #include <QLocale>
 #include <QPixmap>
 #include <QPlainTextEdit>
+#include <QRect>
+#include <QScreen>
 #include <QScrollArea>
 #include <QSet>
 #include <QStackedWidget>
+#include <QTimer>
+
+static const int PRESET_WIDTHS[] = { 260, 420, 600 };
+
+int PreviewPane::presetWidth(int preset)
+{
+    preset = qBound(0, preset, NUM_PRESETS - 1);
+    return PRESET_WIDTHS[preset];
+}
 
 PreviewPane::PreviewPane(QWidget *parent)
     : QDockWidget(tr("Preview"), parent) {
@@ -54,15 +69,55 @@ PreviewPane::PreviewPane(QWidget *parent)
     m_stack->setCurrentWidget(m_empty);
 
     setWidget(m_stack);
-    setMinimumWidth(260);
+    setMinimumWidth(PRESET_WIDTHS[0]);
+
+    /* Hover popup — frameless top-level label that floats over the UI. */
+    m_hoverPopup = new QLabel(nullptr,
+        Qt::Window | Qt::FramelessWindowHint |
+        Qt::WindowStaysOnTopHint | Qt::WindowDoesNotAcceptFocus);
+    m_hoverPopup->setAlignment(Qt::AlignCenter);
+    m_hoverPopup->setStyleSheet(
+        QStringLiteral("QLabel { background: #1a1a1a; border: 1px solid #606060; padding: 4px; }"));
+    m_hoverPopup->hide();
+
+    /* Timer that delays showing the popup after the cursor enters the image. */
+    m_hoverTimer = new QTimer(this);
+    m_hoverTimer->setSingleShot(true);
+    connect(m_hoverTimer, &QTimer::timeout, this, &PreviewPane::showHoverPopup);
+
+    m_imgLabel->installEventFilter(this);
 }
+
+/* ------------------------------------------------------------------ */
+/* Size presets                                                         */
+/* ------------------------------------------------------------------ */
+
+void PreviewPane::setSizePreset(int preset)
+{
+    preset = qBound(0, preset, NUM_PRESETS - 1);
+    if (preset == m_sizePreset) return;
+    m_sizePreset = preset;
+    setMinimumWidth(PRESET_WIDTHS[preset]);
+    emit sizePresetChanged(preset, PRESET_WIDTHS[preset]);
+}
+
+void PreviewPane::stepPreset(int delta)
+{
+    setSizePreset(m_sizePreset + delta);
+}
+
+/* ------------------------------------------------------------------ */
+/* Content display                                                      */
+/* ------------------------------------------------------------------ */
 
 void PreviewPane::clear() {
     m_current.clear();
+    m_fullPixmap = QPixmap();
     m_imgLabel->clear();
     m_text->clear();
     m_meta->clear();
     m_stack->setCurrentWidget(m_empty);
+    hideHoverPopup();
 }
 
 bool PreviewPane::isImage(const QString &path) {
@@ -85,6 +140,7 @@ bool PreviewPane::isText(const QString &path) {
 void PreviewPane::showPath(const QString &path) {
     if (path == m_current) return;
     m_current = path;
+    hideHoverPopup();
     if (path.isEmpty()) { clear(); return; }
 
     QFileInfo fi(path);
@@ -101,8 +157,10 @@ void PreviewPane::showImage(const QString &path) {
     const QImage img = r.read();
     if (img.isNull()) { showMetadata(path); return; }
 
+    m_fullPixmap = QPixmap::fromImage(img);
+
     const QSize viewSize = m_imgScroll->viewport()->size();
-    QPixmap pix = QPixmap::fromImage(img);
+    QPixmap pix = m_fullPixmap;
     if (pix.width() > viewSize.width() || pix.height() > viewSize.height()) {
         pix = pix.scaled(viewSize, Qt::KeepAspectRatio, Qt::SmoothTransformation);
     }
@@ -165,4 +223,59 @@ void PreviewPane::showMetadata(const QString &path) {
     m_meta->setText(html);
     m_meta->setTextFormat(Qt::RichText);
     m_stack->setCurrentWidget(m_meta);
+}
+
+/* ------------------------------------------------------------------ */
+/* Hover popup                                                          */
+/* ------------------------------------------------------------------ */
+
+bool PreviewPane::eventFilter(QObject *obj, QEvent *event)
+{
+    if (obj == m_imgLabel) {
+        if (event->type() == QEvent::Enter) {
+            m_hoverTimer->start(400);
+        } else if (event->type() == QEvent::Leave) {
+            m_hoverTimer->stop();
+            hideHoverPopup();
+        }
+    }
+    return QDockWidget::eventFilter(obj, event);
+}
+
+void PreviewPane::showHoverPopup()
+{
+    /* Only show when not already at the largest preset and image is loaded. */
+    if (m_sizePreset >= NUM_PRESETS - 1 || m_fullPixmap.isNull()) return;
+
+    const QScreen *screen = QGuiApplication::screenAt(QCursor::pos());
+    if (!screen) return;
+    const QSize avail = screen->availableSize();
+
+    /* Cap at 80 % of the screen in each dimension. */
+    const int maxW = static_cast<int>(avail.width()  * 0.80);
+    const int maxH = static_cast<int>(avail.height() * 0.80);
+
+    QPixmap scaled = m_fullPixmap;
+    if (scaled.width() > maxW || scaled.height() > maxH)
+        scaled = m_fullPixmap.scaled(maxW, maxH, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+
+    m_hoverPopup->setPixmap(scaled);
+    /* +10 px padding on each side from the style sheet (4 px padding + 1 px border × 2). */
+    m_hoverPopup->resize(scaled.width() + 10, scaled.height() + 10);
+
+    /* Position near cursor, nudged so it stays on screen. */
+    QPoint pos = QCursor::pos() + QPoint(20, 20);
+    const QRect popupRect(pos, m_hoverPopup->size());
+    const QRect screenRect(screen->availableGeometry());
+    if (popupRect.right()  > screenRect.right())
+        pos.setX(QCursor::pos().x() - m_hoverPopup->width() - 20);
+    if (popupRect.bottom() > screenRect.bottom())
+        pos.setY(QCursor::pos().y() - m_hoverPopup->height() - 20);
+    m_hoverPopup->move(pos);
+    m_hoverPopup->show();
+}
+
+void PreviewPane::hideHoverPopup()
+{
+    m_hoverPopup->hide();
 }

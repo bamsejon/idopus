@@ -69,8 +69,13 @@ if(APPLE)
             MACOSX_PACKAGE_LOCATION Resources/${lproj})
     endforeach()
 
+    set(ICON_FILE "${CMAKE_SOURCE_DIR}/resources/iDOpus.icns")
+    set_source_files_properties(${ICON_FILE} PROPERTIES
+        MACOSX_PACKAGE_LOCATION Resources)
+
     add_executable(idopus MACOSX_BUNDLE
         src/gui/AppDelegate.m
+        ${ICON_FILE}
         ${LOCALIZATION_FILES}
     )
     target_compile_options(idopus PRIVATE "-fobjc-arc")
