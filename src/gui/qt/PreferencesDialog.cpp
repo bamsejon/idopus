@@ -1,6 +1,7 @@
 #include "PreferencesDialog.h"
 
 #include <QCheckBox>
+#include <QComboBox>
 #include <QDialogButtonBox>
 #include <QFormLayout>
 #include <QGroupBox>
@@ -22,6 +23,7 @@ bool PreferencesDialog::permanentDelete()     { return readBool(KEY_PERMA_DEL,  
 bool PreferencesDialog::restorePaths()        { return readBool(KEY_RESTORE_PATHS, true);  }
 bool PreferencesDialog::showButtonBank()      { return readBool(KEY_SHOW_BANK,     true);  }
 int  PreferencesDialog::historySize()         { return readInt (KEY_HISTORY_SIZE,  128);   }
+int  PreferencesDialog::previewSize()         { return readInt (KEY_PREVIEW_SIZE,  0);     }
 
 PreferencesDialog::PreferencesDialog(QWidget *parent) : QDialog(parent) {
     setWindowTitle(tr("Preferences"));
@@ -30,9 +32,16 @@ PreferencesDialog::PreferencesDialog(QWidget *parent) : QDialog(parent) {
     auto *displayGroup = new QGroupBox(tr("Display"), this);
     m_hideDot  = new QCheckBox(tr("Hide dotfiles in new listers"), displayGroup);
     m_showBank = new QCheckBox(tr("Show Button Bank"),              displayGroup);
+    m_previewSize = new QComboBox(displayGroup);
+    m_previewSize->addItem(tr("Small"),  0);
+    m_previewSize->addItem(tr("Medium"), 1);
+    m_previewSize->addItem(tr("Large"),  2);
+    auto *prevForm = new QFormLayout;
+    prevForm->addRow(tr("Preview pane size:"), m_previewSize);
     auto *dLay = new QVBoxLayout(displayGroup);
     dLay->addWidget(m_hideDot);
     dLay->addWidget(m_showBank);
+    dLay->addLayout(prevForm);
 
     auto *deleteGroup = new QGroupBox(tr("Deletion"), this);
     m_confirmDel = new QCheckBox(tr("Ask before deleting"),      deleteGroup);
@@ -82,6 +91,7 @@ void PreferencesDialog::load() {
     m_permaDel->setChecked(permanentDelete());
     m_restore->setChecked(restorePaths());
     m_history->setValue(historySize());
+    m_previewSize->setCurrentIndex(qBound(0, previewSize(), 2));
 }
 
 void PreferencesDialog::save() {
@@ -92,6 +102,7 @@ void PreferencesDialog::save() {
     s.setValue(QString::fromLatin1(KEY_PERMA_DEL),      m_permaDel->isChecked());
     s.setValue(QString::fromLatin1(KEY_RESTORE_PATHS),  m_restore->isChecked());
     s.setValue(QString::fromLatin1(KEY_HISTORY_SIZE),   m_history->value());
+    s.setValue(QString::fromLatin1(KEY_PREVIEW_SIZE),   m_previewSize->currentIndex());
 }
 
 void PreferencesDialog::resetToDefaults() {
@@ -101,4 +112,5 @@ void PreferencesDialog::resetToDefaults() {
     m_permaDel->setChecked(false);
     m_restore->setChecked(true);
     m_history->setValue(128);
+    m_previewSize->setCurrentIndex(0);
 }

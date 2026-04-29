@@ -163,6 +163,9 @@ typedef NS_ENUM(NSInteger, ListerState) {
 - (void)removeSyncProfileAction:(id)sender;
 - (void)runSyncProfile:(NSMenuItem *)sender;
 - (void)toggleQuickLook:(id)sender;
+- (void)togglePreviewPane:(id)sender;
+- (void)biggerPreviewAction:(id)sender;
+- (void)smallerPreviewAction:(id)sender;
 - (void)sortByAction:(NSMenuItem *)sender;
 - (void)toggleReverseSortAction:(id)sender;
 - (void)toggleFilesMixedAction:(id)sender;
@@ -381,7 +384,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
 - (void)relayoutForExpandedRow;
 @end
 
-@interface ListerWindowController : NSWindowController <NSWindowDelegate, QLPreviewPanelDataSource, QLPreviewPanelDelegate, NSMenuDelegate, NSSearchFieldDelegate>
+@interface ListerWindowController : NSWindowController <NSWindowDelegate, QLPreviewPanelDataSource, QLPreviewPanelDelegate, NSMenuDelegate, NSSearchFieldDelegate, NSSplitViewDelegate>
 @property (nonatomic, strong) ListerDataSource *dataSource;
 @property (nonatomic, strong) NSTableView *tableView;
 @property (nonatomic, strong) NSTextField *pathField;        /* edit mode */
@@ -406,6 +409,22 @@ typedef NS_ENUM(NSInteger, ListerState) {
  * local one). FSEvents is skipped; pal_file operations are bypassed. */
 @property (nonatomic, copy) NSString *remoteSpec;
 @property (nonatomic, copy) NSString *remoteLabel;
+/* Preview pane */
+@property (nonatomic, strong) NSSplitView *mainSplitView;
+@property (nonatomic, strong) NSView *listPanel;
+@property (nonatomic, strong) NSView *previewContainer;
+@property (nonatomic, strong) NSImageView *previewImageView;
+@property (nonatomic, strong) NSScrollView *previewTextScroll;
+@property (nonatomic, strong) NSTextView *previewTextView;
+@property (nonatomic, strong) NSTextField *previewTitleLabel;
+@property (nonatomic, strong) NSTextField *previewMetaLabel;
+@property (nonatomic, copy)   NSString *previewCurrentPath;
+@property (nonatomic, assign) NSInteger previewSizePreset;
+@property (nonatomic, strong) NSPanel *previewHoverPanel;
+@property (nonatomic, strong) NSImage *previewFullImage;
+/* List-row hover popup */
+@property (nonatomic, strong) NSPanel *listHoverPanel;
+@property (nonatomic, assign) NSInteger listHoverRow;
 - (void)loadRemotePath:(NSString *)path;
 - (BOOL)isRemote;
 - (void)setState:(ListerState)state;
@@ -418,6 +437,10 @@ typedef NS_ENUM(NSInteger, ListerState) {
 - (void)reloadBuffer;
 - (void)updateStatusBar;
 - (BOOL)startInlineRenameIfSingleSelection;
+- (void)updatePreview;
+- (void)stepPreviewPreset:(NSInteger)delta;
+- (void)stepListThumbPreset:(NSInteger)delta;
+- (void)hidePreviewHoverPanel;
 @end
 
 #pragma mark - Lister Table Data
@@ -439,6 +462,14 @@ typedef NS_ENUM(NSInteger, ListerState) {
 - (void)applyCurrentFilter;
 - (NSInteger)rowForNamePrefix:(NSString *)prefix;
 @end
+
+static const CGFloat kListThumbSizes[]  = { 18.0, 32.0, 48.0 };
+static const CGFloat kListRowHeights[]  = { 22.0, 36.0, 52.0 };
+
+static NSInteger currentListThumbPreset(void) {
+    NSInteger p = [[NSUserDefaults standardUserDefaults] integerForKey:@"prefListThumbSize"];
+    return MAX(0, MIN(2, p));
+}
 
 @implementation ListerDataSource
 
@@ -471,7 +502,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
             NSImage *img = [NSImage imageWithSystemSymbolName:@"folder.fill"
                                         accessibilityDescription:nil];
             if (img) {
-                img.size = NSMakeSize(16, 16);
+                img.size = NSMakeSize(40, 40);
                 _iconCache[@"__remote_dir__"] = img;
             }
             return img;
@@ -491,7 +522,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
         if (!img) img = [NSImage imageWithSystemSymbolName:@"doc"
                                      accessibilityDescription:nil];
         if (img) {
-            img.size = NSMakeSize(16, 16);
+            img.size = NSMakeSize(40, 40);
             _iconCache[extKey] = img;
         }
         return img;
@@ -506,7 +537,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
                       entry->name, full, sizeof(full));
         NSImage *img = [[NSWorkspace sharedWorkspace] iconForFile:
                         [NSString stringWithUTF8String:full]];
-        img.size = NSMakeSize(16, 16);
+        img.size = NSMakeSize(40, 40);
         if (img) _iconCache[@"__dir__"] = img;
         return img;
     }
@@ -535,16 +566,17 @@ typedef NS_ENUM(NSInteger, ListerState) {
     NSImage *cached = _iconCache[extKey];
     if (cached) return cached;
     NSImage *img = [[NSWorkspace sharedWorkspace] iconForFile:fullPath];
-    img.size = NSMakeSize(16, 16);
+    img.size = NSMakeSize(40, 40);
     if (img) _iconCache[extKey] = img;
     return img;
 }
 
 - (void)requestThumbnailForPath:(NSString *)fullPath {
     CGFloat scale = [NSScreen mainScreen].backingScaleFactor ?: 2.0;
+    CGFloat ts = kListThumbSizes[currentListThumbPreset()];
     QLThumbnailGenerationRequest *req = [[QLThumbnailGenerationRequest alloc]
         initWithFileAtURL:[NSURL fileURLWithPath:fullPath]
-                     size:CGSizeMake(18, 18)
+                     size:CGSizeMake(ts, ts)
                     scale:scale
       representationTypes:QLThumbnailGenerationRequestRepresentationTypeThumbnail];
 
@@ -683,22 +715,29 @@ typedef NS_ENUM(NSInteger, ListerState) {
 
     /* Build cell view with proper frame sizing */
     BOOL isNameColumn = [identifier isEqualToString:@"name"];
-    NSTableCellView *cell = [tableView makeViewWithIdentifier:identifier owner:nil];
+    NSInteger thumbPreset = currentListThumbPreset();
+    CGFloat thumbSz = kListThumbSizes[thumbPreset];
+    CGFloat rowH    = kListRowHeights[thumbPreset];
+    /* Encode size in the cell identifier so cells are never reused at the wrong size */
+    NSString *cellId = isNameColumn
+        ? [NSString stringWithFormat:@"name-%d", (int)thumbPreset]
+        : identifier;
+    NSTableCellView *cell = [tableView makeViewWithIdentifier:cellId owner:nil];
     if (!cell) {
-        cell = [[NSTableCellView alloc] initWithFrame:NSMakeRect(0, 0, tableColumn.width, 20)];
-        cell.identifier = identifier;
+        cell = [[NSTableCellView alloc] initWithFrame:NSMakeRect(0, 0, tableColumn.width, rowH)];
+        cell.identifier = cellId;
 
         CGFloat textLeft = 0;
         if (isNameColumn) {
-            NSImageView *iv = [[NSImageView alloc] initWithFrame:NSMakeRect(2, 2, 18, 18)];
+            NSImageView *iv = [[NSImageView alloc] initWithFrame:NSMakeRect(2, 2, thumbSz, thumbSz)];
             iv.imageScaling = NSImageScaleProportionallyUpOrDown;
             iv.autoresizingMask = NSViewMaxXMargin;
             cell.imageView = iv;
             [cell addSubview:iv];
-            textLeft = 24;
+            textLeft = thumbSz + 8;
         }
 
-        NSTextField *tf = [[NSTextField alloc] initWithFrame:NSMakeRect(textLeft, 0, cell.bounds.size.width - textLeft, 20)];
+        NSTextField *tf = [[NSTextField alloc] initWithFrame:NSMakeRect(textLeft, 0, cell.bounds.size.width - textLeft, rowH)];
         tf.bordered = NO;
         tf.drawsBackground = NO;
         tf.editable = NO;
@@ -725,7 +764,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
 }
 
 - (CGFloat)tableView:(NSTableView *)tableView heightOfRow:(NSInteger)row {
-    return 22.0;
+    return kListRowHeights[currentListThumbPreset()];
 }
 
 - (void)tableView:(NSTableView *)tableView didClickTableColumn:(NSTableColumn *)tableColumn {
@@ -736,6 +775,7 @@ typedef NS_ENUM(NSInteger, ListerState) {
 - (void)tableViewSelectionDidChange:(NSNotification *)notification {
     [_owner updateStatusBar];
     [_owner.appDelegate refreshButtonBankEnablement];
+    [_owner updatePreview];
 }
 
 /* Row tooltip — name, size, kind, modified date. Shown on hover. */
@@ -1045,6 +1085,16 @@ typedef NS_ENUM(NSInteger, ListerState) {
     trashItem.keyEquivalentModifierMask = 0;
     _tableView.menu = menu;
 
+    /* Hover tracking for image pop-up preview */
+    _listHoverRow = -1;
+    NSTrackingArea *hoverTA = [[NSTrackingArea alloc]
+        initWithRect:NSZeroRect
+             options:NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited |
+                     NSTrackingActiveInActiveApp | NSTrackingInVisibleRect
+               owner:self
+            userInfo:nil];
+    [_tableView addTrackingArea:hoverTA];
+
     /* Drag-and-drop — accept file URLs from anywhere (other Listers or Finder) */
     [_tableView registerForDraggedTypes:@[NSPasteboardTypeFileURL]];
     [_tableView setDraggingSourceOperationMask:NSDragOperationCopy | NSDragOperationMove
@@ -1053,7 +1103,102 @@ typedef NS_ENUM(NSInteger, ListerState) {
                                      forLocal:NO];
 
     scrollView.documentView = _tableView;
-    [content addSubview:scrollView];
+
+    /* Split view: list on the left, optional preview pane on the right. */
+    _mainSplitView = [[NSSplitView alloc] init];
+    _mainSplitView.vertical = YES;
+    _mainSplitView.dividerStyle = NSSplitViewDividerStyleThin;
+    _mainSplitView.translatesAutoresizingMaskIntoConstraints = NO;
+    _mainSplitView.delegate = self;
+
+    /* Left panel — wraps the file list scroll view */
+    _listPanel = [[NSView alloc] init];
+    _listPanel.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    [_mainSplitView addSubview:_listPanel];
+
+    scrollView.translatesAutoresizingMaskIntoConstraints = NO;
+    [_listPanel addSubview:scrollView];
+    [NSLayoutConstraint activateConstraints:@[
+        [scrollView.topAnchor constraintEqualToAnchor:_listPanel.topAnchor],
+        [scrollView.bottomAnchor constraintEqualToAnchor:_listPanel.bottomAnchor],
+        [scrollView.leadingAnchor constraintEqualToAnchor:_listPanel.leadingAnchor],
+        [scrollView.trailingAnchor constraintEqualToAnchor:_listPanel.trailingAnchor],
+    ]];
+
+    /* Right panel — preview pane (collapsed/hidden by default) */
+    _previewContainer = [[NSView alloc] init];
+    _previewContainer.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    [_mainSplitView addSubview:_previewContainer];
+    [_mainSplitView setHoldingPriority:NSLayoutPriorityDefaultLow + 1 forSubviewAtIndex:0];
+    [_mainSplitView setHoldingPriority:NSLayoutPriorityDefaultLow forSubviewAtIndex:1];
+
+    /* Preview title (filename) */
+    _previewTitleLabel = [NSTextField labelWithString:@""];
+    _previewTitleLabel.font = [NSFont systemFontOfSize:11 weight:NSFontWeightMedium];
+    _previewTitleLabel.textColor = [NSColor secondaryLabelColor];
+    _previewTitleLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
+    _previewTitleLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [_previewContainer addSubview:_previewTitleLabel];
+
+    /* Preview image view */
+    _previewImageView = [[NSImageView alloc] init];
+    _previewImageView.imageScaling = NSImageScaleProportionallyUpOrDown;
+    _previewImageView.imageAlignment = NSImageAlignCenter;
+    _previewImageView.translatesAutoresizingMaskIntoConstraints = NO;
+    _previewImageView.wantsLayer = YES;
+    [_previewContainer addSubview:_previewImageView];
+
+    /* Preview text scroll + view */
+    _previewTextScroll = [[NSScrollView alloc] init];
+    _previewTextScroll.hasVerticalScroller = YES;
+    _previewTextScroll.translatesAutoresizingMaskIntoConstraints = NO;
+    _previewTextView = [[NSTextView alloc] init];
+    _previewTextView.editable = NO;
+    _previewTextView.richText = NO;
+    _previewTextView.font = [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightRegular];
+    _previewTextView.backgroundColor = [NSColor textBackgroundColor];
+    _previewTextScroll.documentView = _previewTextView;
+    [_previewContainer addSubview:_previewTextScroll];
+
+    /* Preview metadata label (for non-image/text files) */
+    _previewMetaLabel = [NSTextField wrappingLabelWithString:@""];
+    _previewMetaLabel.font = [NSFont systemFontOfSize:12 weight:NSFontWeightRegular];
+    _previewMetaLabel.textColor = [NSColor secondaryLabelColor];
+    _previewMetaLabel.alignment = NSTextAlignmentCenter;
+    _previewMetaLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    [_previewContainer addSubview:_previewMetaLabel];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [_previewTitleLabel.topAnchor constraintEqualToAnchor:_previewContainer.topAnchor constant:8],
+        [_previewTitleLabel.leadingAnchor constraintEqualToAnchor:_previewContainer.leadingAnchor constant:8],
+        [_previewTitleLabel.trailingAnchor constraintEqualToAnchor:_previewContainer.trailingAnchor constant:-8],
+
+        [_previewImageView.topAnchor constraintEqualToAnchor:_previewTitleLabel.bottomAnchor constant:6],
+        [_previewImageView.leadingAnchor constraintEqualToAnchor:_previewContainer.leadingAnchor constant:4],
+        [_previewImageView.trailingAnchor constraintEqualToAnchor:_previewContainer.trailingAnchor constant:-4],
+        [_previewImageView.bottomAnchor constraintEqualToAnchor:_previewContainer.bottomAnchor constant:-4],
+
+        [_previewTextScroll.topAnchor constraintEqualToAnchor:_previewTitleLabel.bottomAnchor constant:6],
+        [_previewTextScroll.leadingAnchor constraintEqualToAnchor:_previewContainer.leadingAnchor],
+        [_previewTextScroll.trailingAnchor constraintEqualToAnchor:_previewContainer.trailingAnchor],
+        [_previewTextScroll.bottomAnchor constraintEqualToAnchor:_previewContainer.bottomAnchor],
+
+        [_previewMetaLabel.centerXAnchor constraintEqualToAnchor:_previewContainer.centerXAnchor],
+        [_previewMetaLabel.centerYAnchor constraintEqualToAnchor:_previewContainer.centerYAnchor],
+        [_previewMetaLabel.leadingAnchor constraintEqualToAnchor:_previewContainer.leadingAnchor constant:12],
+        [_previewMetaLabel.trailingAnchor constraintEqualToAnchor:_previewContainer.trailingAnchor constant:-12],
+    ]];
+
+    /* Restore size preset and visibility from prefs */
+    NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+    NSInteger savedPreset = [ud objectForKey:@"prefPreviewSize"]
+        ? [ud integerForKey:@"prefPreviewSize"] : 1;
+    _previewSizePreset = MAX(0, MIN(kPreviewNumPresets - 1, savedPreset));
+    BOOL previewVisible = [ud objectForKey:@"prefPreviewVisible"]
+        ? [ud boolForKey:@"prefPreviewVisible"] : NO;
+    _previewContainer.hidden = !previewVisible;
+
+    [content addSubview:_mainSplitView];
 
     /* Empty-state overlay — shown when the table has zero entries. Appears
      * centered above the scroll view so the user gets a hint rather than an
@@ -1179,10 +1324,10 @@ typedef NS_ENUM(NSInteger, ListerState) {
         [_findField.trailingAnchor constraintEqualToAnchor:content.trailingAnchor constant:-8],
         (_findHeightConstraint = [_findField.heightAnchor constraintEqualToConstant:0]),
 
-        [scrollView.topAnchor constraintEqualToAnchor:_findField.bottomAnchor constant:4],
-        [scrollView.leadingAnchor constraintEqualToAnchor:content.leadingAnchor],
-        [scrollView.trailingAnchor constraintEqualToAnchor:content.trailingAnchor],
-        [scrollView.bottomAnchor constraintEqualToAnchor:_statusBar.topAnchor constant:-4],
+        [_mainSplitView.topAnchor constraintEqualToAnchor:_findField.bottomAnchor constant:4],
+        [_mainSplitView.leadingAnchor constraintEqualToAnchor:content.leadingAnchor],
+        [_mainSplitView.trailingAnchor constraintEqualToAnchor:content.trailingAnchor],
+        [_mainSplitView.bottomAnchor constraintEqualToAnchor:_statusBar.topAnchor constant:-4],
 
         [_stateLabel.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:4],
         [_stateLabel.bottomAnchor constraintEqualToAnchor:content.bottomAnchor constant:-4],
@@ -1983,6 +2128,371 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     NSArray<NSString *> *paths = [self selectedPaths];
     if (idx < 0 || idx >= (NSInteger)paths.count) return nil;
     return [NSURL fileURLWithPath:paths[idx]];
+}
+
+#pragma mark Preview Pane
+
+static const CGFloat kPreviewPresetWidths[] = { 260.0, 420.0, 600.0 };
+static const NSInteger kPreviewNumPresets = 3;
+
+
+- (void)stepPreviewPreset:(NSInteger)delta {
+    NSInteger preset = _previewSizePreset + delta;
+    preset = MAX(0, MIN(kPreviewNumPresets - 1, preset));
+    if (preset == _previewSizePreset && !_previewContainer.hidden) return;
+    _previewSizePreset = preset;
+    [[NSUserDefaults standardUserDefaults] setInteger:preset forKey:@"prefPreviewSize"];
+    if (_previewContainer.hidden) {
+        _previewContainer.hidden = NO;
+        [[NSUserDefaults standardUserDefaults] setBool:YES forKey:@"prefPreviewVisible"];
+        [self updatePreview];
+    }
+    CGFloat w = kPreviewPresetWidths[preset];
+    CGFloat total = _mainSplitView.frame.size.width;
+    [_mainSplitView setPosition:MAX(200.0, total - w) ofDividerAtIndex:0];
+}
+
+- (void)stepListThumbPreset:(NSInteger)delta {
+    NSInteger p = [[NSUserDefaults standardUserDefaults] integerForKey:@"prefListThumbSize"];
+    p = MAX(0, MIN(2, p + delta));
+    [[NSUserDefaults standardUserDefaults] setInteger:p forKey:@"prefListThumbSize"];
+    /* Flush per-file thumbnail cache — old sizes are the wrong dimensions */
+    [_dataSource.thumbnailCache removeAllObjects];
+    [_dataSource.pendingThumbnails removeAllObjects];
+    [_tableView reloadData];
+}
+
+- (CGFloat)splitView:(NSSplitView *)splitView
+    constrainMinCoordinate:(CGFloat)proposedMinimumPosition
+         ofSubviewAt:(NSInteger)dividerIndex {
+    return 200.0;
+}
+
+- (CGFloat)splitView:(NSSplitView *)splitView
+    constrainMaxCoordinate:(CGFloat)proposedMaximumPosition
+         ofSubviewAt:(NSInteger)dividerIndex {
+    return splitView.frame.size.width - kPreviewPresetWidths[0];
+}
+
+- (BOOL)splitView:(NSSplitView *)splitView canCollapseSubview:(NSView *)subview {
+    return subview == _previewContainer;
+}
+
+static NSSet<NSString *> *previewImageExtensions(void) {
+    static NSSet *s;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        s = [NSSet setWithObjects:@"jpg", @"jpeg", @"png", @"gif", @"tiff", @"tif",
+             @"bmp", @"heic", @"heif", @"webp", @"svg", nil];
+    });
+    return s;
+}
+
+static NSSet<NSString *> *previewTextExtensions(void) {
+    static NSSet *s;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        s = [NSSet setWithObjects:@"txt", @"md", @"markdown", @"c", @"h", @"cpp",
+             @"m", @"swift", @"py", @"js", @"ts", @"json", @"xml", @"yaml", @"yml",
+             @"sh", @"bash", @"zsh", @"css", @"html", @"htm", @"log", @"ini",
+             @"cfg", @"conf", @"toml", @"rs", @"go", @"java", @"rb", @"pl", nil];
+    });
+    return s;
+}
+
+- (void)updatePreview {
+    if (_previewContainer.hidden) return;
+    NSArray<NSString *> *paths = [self selectedPaths];
+    NSString *path = paths.count == 1 ? paths.firstObject : nil;
+    if ([path isEqualToString:_previewCurrentPath]) return;
+    _previewCurrentPath = path;
+
+    if (!path) {
+        [self showPreviewEmpty];
+        return;
+    }
+    NSString *ext = path.pathExtension.lowercaseString;
+    if ([previewImageExtensions() containsObject:ext]) {
+        [self showPreviewImageAtPath:path];
+    } else if ([previewTextExtensions() containsObject:ext]) {
+        [self showPreviewTextAtPath:path];
+    } else {
+        [self showPreviewMetaAtPath:path];
+    }
+}
+
+- (void)showPreviewEmpty {
+    _previewFullImage = nil;
+    _previewTitleLabel.stringValue = @"";
+    _previewImageView.image = nil;
+    _previewImageView.hidden = YES;
+    _previewTextScroll.hidden = YES;
+    _previewMetaLabel.hidden = NO;
+    _previewMetaLabel.stringValue = L(@"No selection");
+    [self hidePreviewHoverPanel];
+}
+
+- (void)showPreviewImageAtPath:(NSString *)path {
+    _previewTitleLabel.stringValue = path.lastPathComponent;
+
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSImage *img = [[NSImage alloc] initWithContentsOfFile:path];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            typeof(self) s = weakSelf;
+            if (!s || ![s->_previewCurrentPath isEqualToString:path]) return;
+            if (!img) { [s showPreviewMetaAtPath:path]; return; }
+            s->_previewFullImage = img;
+            s->_previewImageView.image = img;
+            s->_previewImageView.hidden = NO;
+            s->_previewTextScroll.hidden = YES;
+            s->_previewMetaLabel.hidden = YES;
+            [s setupPreviewImageTracking];
+        });
+    });
+
+    /* Show loading state immediately */
+    _previewImageView.image = nil;
+    _previewImageView.hidden = NO;
+    _previewTextScroll.hidden = YES;
+    _previewMetaLabel.hidden = YES;
+}
+
+- (void)showPreviewTextAtPath:(NSString *)path {
+    _previewTitleLabel.stringValue = path.lastPathComponent;
+    _previewFullImage = nil;
+    [self hidePreviewHoverPanel];
+
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSFileHandle *fh = [NSFileHandle fileHandleForReadingAtPath:path];
+        NSData *data = fh ? [fh readDataOfLength:131072] : nil;
+        [fh closeFile];
+        NSString *text = data ? [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] : nil;
+        if (!text) text = data ? [[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding] : nil;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            typeof(self) s = weakSelf;
+            if (!s || ![s->_previewCurrentPath isEqualToString:path]) return;
+            s->_previewTextView.string = text ?: @"";
+            s->_previewImageView.hidden = YES;
+            s->_previewTextScroll.hidden = NO;
+            s->_previewMetaLabel.hidden = YES;
+        });
+    });
+
+    _previewImageView.hidden = YES;
+    _previewTextScroll.hidden = NO;
+    _previewMetaLabel.hidden = YES;
+    _previewTextView.string = @"";
+}
+
+- (void)showPreviewMetaAtPath:(NSString *)path {
+    _previewTitleLabel.stringValue = path.lastPathComponent;
+    _previewFullImage = nil;
+    [self hidePreviewHoverPanel];
+
+    NSDictionary *attrs = [[NSFileManager defaultManager] attributesOfItemAtPath:path error:nil];
+    NSMutableString *meta = [NSMutableString string];
+    if (attrs) {
+        NSString *type = attrs[NSFileType];
+        BOOL isDir = [type isEqualToString:NSFileTypeDirectory];
+        if (!isDir) {
+            unsigned long long sz = [attrs[NSFileSize] unsignedLongLongValue];
+            NSByteCountFormatter *fmt = [[NSByteCountFormatter alloc] init];
+            fmt.countStyle = NSByteCountFormatterCountStyleFile;
+            [meta appendFormat:@"%@\n", [fmt stringFromByteCount:(long long)sz]];
+        }
+        NSDate *mod = attrs[NSFileModificationDate];
+        if (mod) {
+            NSDateFormatter *df = [[NSDateFormatter alloc] init];
+            df.dateStyle = NSDateFormatterMediumStyle;
+            df.timeStyle = NSDateFormatterShortStyle;
+            [meta appendFormat:@"%@\n", [df stringFromDate:mod]];
+        }
+        NSString *ext = path.pathExtension;
+        if (ext.length) [meta appendFormat:@".%@", ext.uppercaseString];
+    }
+    _previewImageView.hidden = YES;
+    _previewTextScroll.hidden = YES;
+    _previewMetaLabel.hidden = NO;
+    _previewMetaLabel.stringValue = meta.length ? meta : path.lastPathComponent;
+}
+
+#pragma mark Preview hover popup
+
+- (void)setupPreviewImageTracking {
+    for (NSTrackingArea *ta in _previewImageView.trackingAreas.copy)
+        [_previewImageView removeTrackingArea:ta];
+    NSDictionary *info = @{@"source": @"previewPane"};
+    NSTrackingArea *ta = [[NSTrackingArea alloc]
+        initWithRect:NSZeroRect
+             options:NSTrackingMouseEnteredAndExited | NSTrackingActiveInActiveApp | NSTrackingInVisibleRect
+               owner:self
+            userInfo:info];
+    [_previewImageView addTrackingArea:ta];
+}
+
+- (void)mouseEntered:(NSEvent *)event {
+    NSString *src = event.trackingArea.userInfo[@"source"];
+    if ([src isEqualToString:@"previewPane"] && _previewFullImage)
+        [self performSelector:@selector(showPreviewHoverPanel) withObject:nil afterDelay:0.4];
+}
+
+- (void)mouseExited:(NSEvent *)event {
+    NSString *src = event.trackingArea.userInfo[@"source"];
+    if ([src isEqualToString:@"previewPane"]) {
+        [NSObject cancelPreviousPerformRequestsWithTarget:self
+                                                 selector:@selector(showPreviewHoverPanel)
+                                                   object:nil];
+        [_previewHoverPanel orderOut:nil];
+    } else {
+        /* Table view tracking area — mouse left the list */
+        [self cancelListHover];
+    }
+}
+
+- (void)showPreviewHoverPanel {
+    if (!_previewFullImage) return;
+
+    NSScreen *screen = self.window.screen ?: [NSScreen mainScreen];
+    NSSize avail = screen.visibleFrame.size;
+    CGFloat maxW = avail.width  * 0.80;
+    CGFloat maxH = avail.height * 0.80;
+
+    NSSize imgSize = _previewFullImage.size;
+    CGFloat scale = MIN(1.0, MIN(maxW / imgSize.width, maxH / imgSize.height));
+    NSSize popupSize = NSMakeSize(floor(imgSize.width * scale), floor(imgSize.height * scale));
+
+    if (!_previewHoverPanel) {
+        _previewHoverPanel = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, popupSize.width, popupSize.height)
+                                                        styleMask:NSWindowStyleMaskBorderless
+                                                          backing:NSBackingStoreBuffered
+                                                            defer:NO];
+        _previewHoverPanel.backgroundColor = [NSColor colorWithWhite:0.1 alpha:1.0];
+        _previewHoverPanel.hasShadow = YES;
+        _previewHoverPanel.level = NSFloatingWindowLevel;
+        NSImageView *iv = [[NSImageView alloc] initWithFrame:NSMakeRect(4, 4, popupSize.width - 8, popupSize.height - 8)];
+        iv.imageScaling = NSImageScaleProportionallyUpOrDown;
+        iv.imageAlignment = NSImageAlignCenter;
+        iv.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+        [_previewHoverPanel.contentView addSubview:iv];
+    }
+
+    [_previewHoverPanel setContentSize:NSMakeSize(popupSize.width + 8, popupSize.height + 8)];
+    NSImageView *iv = _previewHoverPanel.contentView.subviews.firstObject;
+    iv.image = _previewFullImage;
+
+    /* Position near cursor, nudged to stay on-screen */
+    NSPoint cursor = [NSEvent mouseLocation];
+    NSPoint pos = NSMakePoint(cursor.x + 20, cursor.y - popupSize.height - 20);
+    NSRect screenRect = screen.visibleFrame;
+    if (pos.x + popupSize.width + 8 > NSMaxX(screenRect))
+        pos.x = cursor.x - popupSize.width - 28;
+    if (pos.y < NSMinY(screenRect))
+        pos.y = cursor.y + 20;
+    [_previewHoverPanel setFrameOrigin:pos];
+    [_previewHoverPanel orderFront:nil];
+}
+
+- (void)hidePreviewHoverPanel {
+    [NSObject cancelPreviousPerformRequestsWithTarget:self
+                                             selector:@selector(showPreviewHoverPanel)
+                                               object:nil];
+    [_previewHoverPanel orderOut:nil];
+}
+
+#pragma mark List hover popup
+
+/* Mouse tracking on the table view — owner:self routes events here. */
+- (void)mouseMoved:(NSEvent *)event {
+    NSPoint pt = [_tableView convertPoint:event.locationInWindow fromView:nil];
+    NSInteger row = [_tableView rowAtPoint:pt];
+    if (row == _listHoverRow) return;
+    [self cancelListHover];
+    _listHoverRow = row;
+    if (row >= 0)
+        [self performSelector:@selector(showListHoverForCurrentRow)
+                   withObject:nil afterDelay:0.4];
+}
+
+
+- (void)cancelListHover {
+    [NSObject cancelPreviousPerformRequestsWithTarget:self
+                                             selector:@selector(showListHoverForCurrentRow)
+                                               object:nil];
+    [_listHoverPanel orderOut:nil];
+    _listHoverRow = -1;
+}
+
+- (void)showListHoverForCurrentRow {
+    NSInteger row = _listHoverRow;
+    if (row < 0 || !_dataSource.buffer) return;
+    dir_entry_t *e = dir_buffer_get_entry(_dataSource.buffer, (int)row);
+    if (!e || !e->name || dir_entry_is_dir(e)) return;
+
+    char full[4096];
+    pal_path_join([_currentPath fileSystemRepresentation], e->name, full, sizeof(full));
+    NSString *path = [NSString stringWithUTF8String:full];
+
+    /* Only show popup for image files */
+    NSString *ext = path.pathExtension.lowercaseString;
+    static NSSet *imgExts;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        imgExts = [NSSet setWithObjects:@"jpg",@"jpeg",@"png",@"gif",@"tiff",@"tif",
+                   @"bmp",@"heic",@"heif",@"webp",@"svg", nil];
+    });
+    if (![imgExts containsObject:ext]) return;
+
+    __weak typeof(self) weakSelf = self;
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        NSImage *img = [[NSImage alloc] initWithContentsOfFile:path];
+        if (!img) return;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            typeof(self) s = weakSelf;
+            if (!s || s->_listHoverRow != row) return;
+            [s showListHoverPanelWithImage:img];
+        });
+    });
+}
+
+- (void)showListHoverPanelWithImage:(NSImage *)img {
+    NSScreen *screen = self.window.screen ?: [NSScreen mainScreen];
+    NSSize avail = screen.visibleFrame.size;
+    CGFloat maxW = avail.width  * 0.80;
+    CGFloat maxH = avail.height * 0.80;
+    NSSize sz = img.size;
+    CGFloat scale = MIN(1.0, MIN(maxW / sz.width, maxH / sz.height));
+    NSSize popupSz = NSMakeSize(floor(sz.width * scale), floor(sz.height * scale));
+
+    if (!_listHoverPanel) {
+        _listHoverPanel = [[NSPanel alloc]
+            initWithContentRect:NSMakeRect(0, 0, popupSz.width + 8, popupSz.height + 8)
+                      styleMask:NSWindowStyleMaskBorderless
+                        backing:NSBackingStoreBuffered
+                          defer:NO];
+        _listHoverPanel.backgroundColor = [NSColor colorWithWhite:0.1 alpha:1.0];
+        _listHoverPanel.hasShadow = YES;
+        _listHoverPanel.level = NSFloatingWindowLevel;
+        NSImageView *iv = [[NSImageView alloc]
+            initWithFrame:NSMakeRect(4, 4, popupSz.width, popupSz.height)];
+        iv.imageScaling = NSImageScaleProportionallyUpOrDown;
+        iv.imageAlignment = NSImageAlignCenter;
+        iv.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+        [_listHoverPanel.contentView addSubview:iv];
+    }
+    [_listHoverPanel setContentSize:NSMakeSize(popupSz.width + 8, popupSz.height + 8)];
+    ((NSImageView *)_listHoverPanel.contentView.subviews.firstObject).image = img;
+
+    NSPoint cursor = [NSEvent mouseLocation];
+    NSRect screenRect = screen.visibleFrame;
+    NSPoint pos = NSMakePoint(cursor.x + 20, cursor.y - popupSz.height - 20);
+    if (pos.x + popupSz.width + 8 > NSMaxX(screenRect))
+        pos.x = cursor.x - popupSz.width - 28;
+    if (pos.y < NSMinY(screenRect))
+        pos.y = cursor.y + 20;
+    [_listHoverPanel setFrameOrigin:pos];
+    [_listHoverPanel orderFront:nil];
 }
 
 - (void)selectByPattern:(NSString *)pattern {
@@ -3385,7 +3895,7 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
 }
 
 - (instancetype)initWithAppDelegate:(IDOpusAppDelegate *)app {
-    NSRect frame = NSMakeRect(0, 0, 460, 280);
+    NSRect frame = NSMakeRect(0, 0, 460, 400);
     NSWindow *w = [[NSWindow alloc] initWithContentRect:frame
                                               styleMask:(NSWindowStyleMaskTitled |
                                                          NSWindowStyleMaskClosable)
@@ -3418,6 +3928,24 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
                                            key:@"prefDualPaneStartup" defaultOn:YES]];
     [col addArrangedSubview:[self makeCheckbox:L(@"Show Button Bank at launch")
                                            key:@"prefButtonBankVisible" defaultOn:YES]];
+
+    NSTextField *listHeader = [NSTextField labelWithString:L(@"File list")];
+    listHeader.font = [NSFont boldSystemFontOfSize:13];
+    [col addArrangedSubview:listHeader];
+    [col addArrangedSubview:[self makeSegmentedWithLabel:L(@"Thumbnail size:")
+                                                segments:@[L(@"Small"), L(@"Medium"), L(@"Large")]
+                                                     key:@"prefListThumbSize"
+                                            defaultIndex:0]];
+
+    NSTextField *previewHeader = [NSTextField labelWithString:L(@"Preview pane")];
+    previewHeader.font = [NSFont boldSystemFontOfSize:13];
+    [col addArrangedSubview:previewHeader];
+    [col addArrangedSubview:[self makeCheckbox:L(@"Show Preview Pane at launch")
+                                          key:@"prefPreviewVisible" defaultOn:NO]];
+    [col addArrangedSubview:[self makeSegmentedWithLabel:L(@"Preview pane width:")
+                                                segments:@[L(@"Narrow"), L(@"Medium"), L(@"Wide")]
+                                                     key:@"prefPreviewSize"
+                                            defaultIndex:1]];
 
     NSTextField *deleteHeader = [NSTextField labelWithString:L(@"File operations")];
     deleteHeader.font = [NSFont boldSystemFontOfSize:13];
@@ -3469,6 +3997,44 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
     b.state = on ? NSControlStateValueOn : NSControlStateValueOff;
     objc_setAssociatedObject(b, "prefKey", key, OBJC_ASSOCIATION_COPY);
     return b;
+}
+
+- (NSView *)makeSegmentedWithLabel:(NSString *)title
+                         segments:(NSArray<NSString *> *)segments
+                              key:(NSString *)key
+                     defaultIndex:(NSInteger)defaultIdx {
+    NSView *row = [[NSView alloc] init];
+    row.translatesAutoresizingMaskIntoConstraints = NO;
+
+    NSTextField *lbl = [NSTextField labelWithString:title];
+    lbl.translatesAutoresizingMaskIntoConstraints = NO;
+    [row addSubview:lbl];
+
+    NSSegmentedControl *seg = [NSSegmentedControl segmentedControlWithLabels:segments
+                                                                trackingMode:NSSegmentSwitchTrackingSelectOne
+                                                                      target:self
+                                                                      action:@selector(segmentedChanged:)];
+    seg.translatesAutoresizingMaskIntoConstraints = NO;
+    NSInteger stored = [[NSUserDefaults standardUserDefaults] objectForKey:key]
+        ? [[NSUserDefaults standardUserDefaults] integerForKey:key] : defaultIdx;
+    seg.selectedSegment = MAX(0, MIN((NSInteger)segments.count - 1, stored));
+    objc_setAssociatedObject(seg, "prefKey", key, OBJC_ASSOCIATION_COPY);
+    [row addSubview:seg];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [lbl.leadingAnchor constraintEqualToAnchor:row.leadingAnchor],
+        [lbl.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [seg.leadingAnchor constraintEqualToAnchor:lbl.trailingAnchor constant:8],
+        [seg.centerYAnchor constraintEqualToAnchor:row.centerYAnchor],
+        [row.heightAnchor constraintEqualToConstant:24],
+    ]];
+    return row;
+}
+
+- (void)segmentedChanged:(NSSegmentedControl *)sender {
+    NSString *key = objc_getAssociatedObject(sender, "prefKey");
+    if (!key) return;
+    [[NSUserDefaults standardUserDefaults] setInteger:sender.selectedSegment forKey:key];
 }
 
 - (void)toggleChanged:(NSButton *)sender {
@@ -3868,6 +4434,19 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
                                              action:@selector(toggleQuickLook:)
                                       keyEquivalent:@" "];
     qlItem.keyEquivalentModifierMask = 0;
+    NSMenuItem *ppItem = [viewMenu addItemWithTitle:L(@"Preview Pane")
+                                              action:@selector(togglePreviewPane:)
+                                       keyEquivalent:@"p"];
+    ppItem.keyEquivalentModifierMask = NSEventModifierFlagCommand | NSEventModifierFlagShift;
+    [viewMenu addItem:[NSMenuItem separatorItem]];
+    NSMenuItem *biggerItem = [viewMenu addItemWithTitle:L(@"Larger Thumbnails")
+                                                 action:@selector(biggerPreviewAction:)
+                                          keyEquivalent:@"+"];
+    biggerItem.keyEquivalentModifierMask = NSEventModifierFlagCommand;
+    NSMenuItem *smallerItem = [viewMenu addItemWithTitle:L(@"Smaller Thumbnails")
+                                                  action:@selector(smallerPreviewAction:)
+                                           keyEquivalent:@"-"];
+    smallerItem.keyEquivalentModifierMask = NSEventModifierFlagCommand;
     [viewMenu addItem:[NSMenuItem separatorItem]];
     [viewMenu addItemWithTitle:L(@"Show/Hide Buttons") action:@selector(toggleButtonBank:) keyEquivalent:@"b"];
     viewItem.submenu = viewMenu;
@@ -4230,6 +4809,36 @@ static void _listerFSEventCallback(ConstFSEventStreamRef stream,
          * which our ListerWindowController answers YES. */
         [panel makeKeyAndOrderFront:nil];
     }
+}
+
+- (void)togglePreviewPane:(id)sender {
+    ListerWindowController *lw = (ListerWindowController *)[NSApp keyWindow].windowController;
+    if (![lw isKindOfClass:[ListerWindowController class]]) return;
+    BOOL nowVisible;
+    if (lw.previewContainer.hidden) {
+        lw.previewContainer.hidden = NO;
+        CGFloat w = kPreviewPresetWidths[lw.previewSizePreset];
+        CGFloat total = lw.mainSplitView.frame.size.width;
+        [lw.mainSplitView setPosition:MAX(200.0, total - w) ofDividerAtIndex:0];
+        [lw updatePreview];
+        nowVisible = YES;
+    } else {
+        lw.previewContainer.hidden = YES;
+        lw.previewCurrentPath = nil;
+        [lw hidePreviewHoverPanel];
+        nowVisible = NO;
+    }
+    [[NSUserDefaults standardUserDefaults] setBool:nowVisible forKey:@"prefPreviewVisible"];
+}
+
+- (void)biggerPreviewAction:(id)sender {
+    for (ListerWindowController *lw in _listerControllers)
+        [lw stepListThumbPreset:1];
+}
+
+- (void)smallerPreviewAction:(id)sender {
+    for (ListerWindowController *lw in _listerControllers)
+        [lw stepListThumbPreset:-1];
 }
 
 - (void)toggleButtonBank:(id)sender {

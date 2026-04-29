@@ -3,6 +3,7 @@
 #include <QDialog>
 
 class QCheckBox;
+class QComboBox;
 class QSpinBox;
 
 /*
@@ -13,6 +14,7 @@ class QSpinBox;
  *   general/restorePathsOnLaunch    (bool)
  *   general/showButtonBank          (bool)
  *   general/historySize             (int, 16..512)
+ *   general/previewSize             (int, 0=Small 1=Medium 2=Large)
  */
 class PreferencesDialog : public QDialog {
     Q_OBJECT
@@ -27,6 +29,7 @@ public:
     static constexpr const char *KEY_RESTORE_PATHS = "general/restorePathsOnLaunch";
     static constexpr const char *KEY_SHOW_BANK     = "general/showButtonBank";
     static constexpr const char *KEY_HISTORY_SIZE  = "general/historySize";
+    static constexpr const char *KEY_PREVIEW_SIZE  = "general/previewSize";
 
     /* Defaults matching the macOS build's behaviour. */
     static bool hideDotfilesDefault();
@@ -35,6 +38,7 @@ public:
     static bool restorePaths();
     static bool showButtonBank();
     static int  historySize();
+    static int  previewSize();   /* 0=Small, 1=Medium, 2=Large */
 
 signals:
     void settingsChanged();
@@ -52,4 +56,5 @@ private:
     QCheckBox *m_restore = nullptr;
     QCheckBox *m_showBank = nullptr;
     QSpinBox  *m_history = nullptr;
+    QComboBox *m_previewSize = nullptr;
 };
