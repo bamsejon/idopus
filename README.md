@@ -64,7 +64,7 @@ Track ongoing work in the `windows/iter-*` branches and open PRs. Goal: reach pa
 Optional — to skip all macOS TCC privacy prompts ("iDOpus wants to access your Documents folder…"):
 System Settings → Privacy & Security → **Full Disk Access** → `+` → `/Applications/iDOpus.app`.
 
-Requires macOS 13 (Ventura) or later on Apple Silicon (M1/M2/M3/M4).
+Requires macOS 13 (Ventura) or later on Apple Silicon (M1/M2/M3/M4/M5).
 
 ## Download & install (Windows 10/11, x64)
 
